@@ -472,7 +472,7 @@ app.get('/', async (req, res) => {
 </head>
 <body class="text-slate-100 min-h-screen">
     <!-- DB Warning Banner -->
-    \${!supabase ? `
+    ${!supabase ? `
     <div class="bg-amber-500/15 border-b border-amber-500/30 text-amber-200 px-4 py-3 text-center text-sm font-semibold flex items-center justify-center gap-2 z-[60] relative">
         <span>⚠️</span>
         <span>Supabase is not configured! Please add your <b>SUPABASE_URL</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> to your Vercel Project Environment Variables.</span>
