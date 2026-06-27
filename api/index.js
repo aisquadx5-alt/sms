@@ -397,6 +397,58 @@ app.get('/api/admin/dashboard-data', adminAuth, async (req, res) => {
 });
 
 /**
+ * 11. SMS Retrieval API: Securely retrieve the latest received messages for a given license key.
+ * This can be used by external integrations like Tampermonkey, scripts, or systems.
+ * Usage: GET /api/messages/latest?key=YOUR_LICENSE_KEY&limit=5
+ */
+app.get('/api/messages/latest', async (req, res) => {
+    const { key, limit } = req.query;
+
+    if (!key) {
+        return res.status(400).json({ success: false, error: "License key is required." });
+    }
+
+    try {
+        // Validate license
+        const { data: device, error: devErr } = await supabase
+            .from('licenses')
+            .select('*')
+            .eq('key', key.trim())
+            .single();
+
+        if (devErr || !device) {
+            return res.status(404).json({ success: false, error: "License not found or invalid key." });
+        }
+
+        if (device.status === 'Blocked') {
+            return res.status(403).json({ success: false, error: "Access blocked: This license key has been deactivated." });
+        }
+
+        // Parse optional limit
+        const limitCount = parseInt(limit, 10) || 5;
+        const finalLimit = Math.min(Math.max(limitCount, 1), 50);
+
+        // Fetch latest messages for this key
+        const { data: messages, error: msgErr } = await supabase
+            .from('message_logs')
+            .select('*')
+            .eq('license_key', key.trim())
+            .order('received_at', { ascending: false })
+            .limit(finalLimit);
+
+        if (msgErr) throw msgErr;
+
+        return res.json({
+            success: true,
+            deviceName: device.device_name,
+            messages: messages || []
+        });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
  * Serving dynamic Dashboard Home page
  */
 app.get('/', (req, res) => {
@@ -511,6 +563,29 @@ app.get('/', (req, res) => {
                         </button>
                     </div>
                 </div>
+
+                <!-- Tampermonkey Integration -->
+                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
+                        <span>🐒</span> Tampermonkey Integration
+                    </h2>
+                    <div class="space-y-3 text-xs text-slate-400 leading-relaxed">
+                        <p>Receive SMS/OTPs directly inside your web pages or automated workflows using Tampermonkey!</p>
+                        
+                        <label class="block text-xs font-semibold text-slate-300 uppercase mt-2">1. Select Registered Node</label>
+                        <select id="tamperKeySelect" onchange="updateTampermonkeyScript()" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white outline-none focus:border-indigo-500">
+                            <!-- Populated dynamically -->
+                            <option value="">No Active Nodes</option>
+                        </select>
+                        
+                        <label class="block text-xs font-semibold text-slate-300 uppercase mt-2">2. Generated UserScript Code</label>
+                        <textarea id="tamperCode" readonly rows="8" class="w-full px-2 py-1.5 bg-slate-950 border border-slate-850 rounded-lg text-[10px] text-indigo-200 font-mono focus:border-indigo-500 transition-all resize-none outline-none select-all"></textarea>
+                        
+                        <button onclick="copyTamperScript()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">
+                            📋 Copy Tampermonkey Script
+                        </button>
+                    </div>
+                </div>
             </div>
 
             <!-- Right Panel: Registered Devices & Live Streams -->
@@ -585,6 +660,8 @@ app.get('/', (req, res) => {
             location.reload();
         }
 
+        let currentDevices = [];
+
         async function fetchData() {
             try {
                 const res = await fetch('/api/admin/dashboard-data', {
@@ -593,15 +670,132 @@ app.get('/', (req, res) => {
                 if (res.status === 401) return logout();
                 const data = await res.json();
                 if (data.success) {
+                    currentDevices = data.devices || [];
                     renderDevices(data.devices);
                     renderMessages(data.messages);
                     
+                    // Populate Tampermonkey dropdown
+                    const tamperSelect = document.getElementById('tamperKeySelect');
+                    const selectedVal = tamperSelect.value;
+                    const activeDevices = (data.devices || []).filter(dev => dev.status === 'Active');
+                    
+                    tamperSelect.innerHTML = activeDevices
+                        .map(dev => `<option value="\${dev.key}">\${dev.device_name} (\${dev.key})</option>`)
+                        .join('') || '<option value="">No Active Nodes Registered</option>';
+                    
+                    // Restore previous selection if still exists
+                    if (selectedVal && tamperSelect.querySelector(\`option[value="\${selectedVal}"]\`)) {
+                        tamperSelect.value = selectedVal;
+                    }
+                    updateTampermonkeyScript();
+
                     document.getElementById('filterMode').value = data.filterMode;
                     document.getElementById('targetValue').value = data.targetValue;
                 }
             } catch(e) {
                 console.error("Fetch Data failed: ", e);
             }
+        }
+
+        function updateTampermonkeyScript() {
+            const key = document.getElementById('tamperKeySelect').value || 'KEY-YOUR-LICENSE-HERE';
+            const baseUrl = window.location.origin;
+            const hostname = window.location.hostname;
+            
+            const script = \`// ==UserScript==
+// @name         SMS Gateway OTP Sync
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.
+// @author       Admin
+// @match        *://*/*
+// @grant        GM_xmlhttpRequest
+// @connect      \${hostname}
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Configured for Terminal Node: \${key}
+    const LICENSE_KEY = "\${key}";
+    const API_URL = "\${baseUrl}/api/messages/latest?key=" + LICENSE_KEY + "&limit=1";
+
+    console.log("[SMS Hub] Tampermonkey Polling Active. Key:", LICENSE_KEY);
+
+    let lastFetchedMsgId = "";
+
+    async function checkForNewMessages() {
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: API_URL,
+            onload: function(response) {
+                try {
+                    const data = JSON.parse(response.responseText);
+                    if (data.success && data.messages && data.messages.length > 0) {
+                        const latestMsg = data.messages[0];
+                        if (latestMsg.id !== lastFetchedMsgId) {
+                            lastFetchedMsgId = latestMsg.id;
+                            console.log("🎉 New SMS Intercepted via Tampermonkey:", latestMsg);
+                            
+                            // Visual Notification on the Web Page
+                            showVisualNotification(latestMsg);
+                        }
+                    }
+                } catch(e) {
+                    console.error("[SMS Hub] Error parsing response:", e);
+                }
+            }
+        });
+    }
+
+    // Display a beautiful visual alert popup on top of the web page
+    function showVisualNotification(msg) {
+        const div = document.createElement('div');
+        div.style.position = 'fixed';
+        div.style.bottom = '20px';
+        div.style.right = '20px';
+        div.style.backgroundColor = '#1e1b4b';
+        div.style.border = '1px solid #4f46e5';
+        div.style.color = '#e0e7ff';
+        div.style.padding = '16px';
+        div.style.borderRadius = '12px';
+        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';
+        div.style.zIndex = '999999';
+        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        div.style.maxWidth = '350px';
+        div.style.transition = 'all 0.3s ease';
+        
+        div.innerHTML = \\\`
+            <div style="font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+                <span>📱 SMS Received</span>
+                <button onclick="this.parentElement.parentElement.remove()" style="background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;">×</button>
+            </div>
+            <div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>\\\\\\\\\\\${msg.sender}</b></div>
+            <div style="font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;">
+                \\\\\\\\\\\${msg.message}
+            </div>
+            <div style="margin-top: 8px; text-align: right;">
+                <button onclick="navigator.clipboard.writeText(\\\\\\\\\\\`\\\\\\\\\\\${msg.message}\\\\\\\\\\\`); alert(\\\\\\\\\\\'SMS copied to clipboard!\\\\\\\\\\');" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button>
+            </div>
+        \\\`;
+        document.body.appendChild(div);
+        
+        // Auto remove after 20 seconds
+        setTimeout(() => { if (div.parentNode) div.remove(); }, 20000);
+    }
+
+    // Poll every 4 seconds
+    setInterval(checkForNewMessages, 4000);
+})();\`;
+
+            document.getElementById('tamperCode').value = script;
+        }
+
+        function copyTamperScript() {
+            const code = document.getElementById('tamperCode');
+            code.select();
+            document.execCommand('copy');
+            alert("🎉 Tampermonkey Script copied to clipboard!\\n\\nPaste it into your Tampermonkey Dashboard (Create a new script, replace everything, and save).");
         }
 
         async function generateLicense() {
@@ -752,7 +946,7 @@ app.get('/', (req, res) => {
                         \${boundStatus}
 
                         <div class="text-[10px] text-slate-500 pt-2 border-t border-slate-800/60">
-                            Last active: \${new Date(dev.last_active).toLocaleString()}
+                            Last active: \s\${new Date(dev.last_active).toLocaleString()}
                         </div>
                     </div>
                 \`;
