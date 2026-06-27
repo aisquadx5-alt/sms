@@ -1,12 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize Supabase Client
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
 
@@ -34,671 +34,671 @@ app.use('/api', (req, res, next) => {
 
 // Shared Admin Authorization Middleware
 const adminAuth = async (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    
-    // Retrieve global admin pin
-    const { data: config } = await supabase
-        .from('global_config')
-        .select('global_pin')
-        .eq('id', 'main_config')
-        .single();
+    try {
+        const adminPin = req.headers['authorization'] || '';
         
-    const globalPin = config ? config.global_pin : "7860";
-
-    if (authHeader && authHeader.trim() === globalPin.trim()) {
-        next();
-    } else {
+        // Retrieve global admin pin
+        const { data: config } = await supabase
+            .from('global_config')
+            .select('global_pin')
+            .eq('id', 'main_config')
+            .single();
+            
+        const expectedPin = config ? config.global_pin : '7860';
+        
+        if (adminPin === expectedPin) {
+            return next();
+        }
         res.status(401).json({ error: "Unauthorized: Invalid admin PIN." });
+    } catch (e) {
+        res.status(500).json({ error: "Authorization process failed." });
     }
 };
 
+// ==========================================
+// CLIENT API ENDPOINTS (For Android App Nodes)
+// ==========================================
+
 /**
- * 1. Activation Endpoint: Validates license key and binds Device UUID
+ * 1. Client App Registration / Verification
  */
-app.post('/api/license/activate', async (req, res) => {
-    const { key, deviceId } = req.body;
+app.post('/api/licenses/register', async (req, res) => {
+    const { key, deviceId, deviceName } = req.body;
+    
     if (!key) {
-        return res.status(400).json({ success: false, error: "License key is required." });
+        return res.status(400).json({ error: "License key is required." });
     }
-
+    
     try {
+        // Query license from Supabase
         const { data: device, error } = await supabase
             .from('licenses')
             .select('*')
-            .eq('key', key.trim())
+            .eq('key', key)
             .single();
-
+            
         if (error || !device) {
-            return res.status(404).json({ success: false, error: "License not found." });
+            return res.status(404).json({ error: "License key invalid or expired." });
         }
-
-        if (device.status === 'Blocked') {
-            return res.status(403).json({ success: false, error: "This license key has been deactivated." });
-        }
-
-        // Enforce one device per license key
-        let updatedDeviceId = device.registered_device_id;
-        if (deviceId) {
-            if (device.registered_device_id && device.registered_device_id !== deviceId) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: "License already registered on another device. Please reset via admin console." 
-                });
-            }
-            if (!device.registered_device_id) {
-                updatedDeviceId = deviceId;
-                await supabase
-                    .from('licenses')
-                    .update({ registered_device_id: deviceId, last_active: new Date() })
-                    .eq('key', key.trim());
-            } else {
-                await supabase
-                    .from('licenses')
-                    .update({ last_active: new Date() })
-                    .eq('key', key.trim());
-            }
-        }
-
-        // Fetch current global filtering rules
-        const { data: config } = await supabase
-            .from('global_config')
-            .select('*')
-            .eq('id', 'main_config')
-            .single();
-
-        return res.status(200).json({
-            success: true,
-            key: device.key,
-            deviceName: device.device_name,
-            consolePin: device.console_pin,
-            status: device.status,
-            filterMode: config ? config.filter_mode : "ALL",
-            targetValue: config ? config.target_value : ""
-        });
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-/**
- * 2. Status Handshake Loop: Periodically called by the app
- */
-app.post('/api/license/status', async (req, res) => {
-    const { key, deviceId } = req.body;
-    if (!key) {
-        return res.status(400).json({ success: false, error: "License key is required." });
-    }
-
-    try {
-        const { data: device, error } = await supabase
-            .from('licenses')
-            .select('*')
-            .eq('key', key.trim())
-            .single();
-
-        if (error || !device) {
-            return res.status(404).json({ success: false, error: "License not found." });
-        }
-
-        if (deviceId && device.registered_device_id && device.registered_device_id !== deviceId) {
-            return res.status(400).json({ success: false, error: "Access denied: Device ID mismatch." });
-        }
-
-        // Update heartbeat
-        await supabase
-            .from('licenses')
-            .update({ last_active: new Date() })
-            .eq('key', key.trim());
-
-        const { data: config } = await supabase
-            .from('global_config')
-            .select('*')
-            .eq('id', 'main_config')
-            .single();
-
-        return res.status(200).json({
-            success: true,
-            status: device.status,
-            consolePin: device.console_pin,
-            filterMode: config ? config.filter_mode : "ALL",
-            targetValue: config ? config.target_value : ""
-        });
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-/**
- * 3. SMS Gateway Stream: Receive SMS logs from active devices
- */
-app.post('/api/sms/incoming', async (req, res) => {
-    const { key, deviceId, message, sender, timestamp, simSlot, deviceLabel } = req.body;
-
-    if (!key || !message || !sender) {
-        return res.status(400).json({ success: false, error: "Missing required properties." });
-    }
-
-    try {
-        const { data: device, error } = await supabase
-            .from('licenses')
-            .select('*')
-            .eq('key', key.trim())
-            .single();
-
-        if (error || !device) {
-            return res.status(404).json({ success: false, error: "License key unregistered." });
-        }
-
-        if (device.status === 'Blocked') {
-            return res.status(403).json({ success: false, error: "Access blocked: License key is disabled." });
-        }
-
-        if (deviceId && device.registered_device_id && device.registered_device_id !== deviceId) {
-            return res.status(400).json({ success: false, error: "Device UUID mismatch." });
-        }
-
-        const msgId = 'msg_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
         
-        await supabase
-            .from('message_logs')
-            .insert({
-                id: msgId,
-                sender: sender,
-                message: message,
-                timestamp: timestamp || Date.now(),
-                device_label: deviceLabel || device.device_name,
-                sim_slot: simSlot || 'SIM 1',
-                license_key: key.trim(),
-                status: 'Forwarded'
+        if (device.status !== 'Active') {
+            return res.status(403).json({ error: "This license key has been deactivated by Admin." });
+        }
+        
+        // Handle Device Locking logic
+        if (device.registered_device_id && device.registered_device_id !== deviceId) {
+            return res.status(400).json({ 
+                error: "License already registered on another device. Please reset via admin console." 
             });
-
-        // Update active device heartbeat
+        }
+        
+        // Update device registration & timestamp
         await supabase
             .from('licenses')
-            .update({ last_active: new Date() })
-            .eq('key', key.trim());
-
-        return res.json({ success: true, messageId: msgId });
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
+            .update({ 
+                registered_device_id: deviceId, 
+                device_name: deviceName || device.device_name,
+                last_active: new Date().toISOString()
+            })
+            .eq('key', key);
+            
+        res.json({
+            success: true,
+            status: "Activated",
+            deviceName: deviceName || device.device_name,
+            consolePin: device.console_pin,
+            message: "Activation credentials authenticated successfully."
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Server database transaction failed." });
     }
 });
 
 /**
- * 4. Admin API: Verify admin PIN code
+ * 2. Inbound SMS Forwarding Engine
+ */
+app.post('/api/messages/intercept', async (req, res) => {
+    const { id, sender, message, timestamp, deviceLabel, simSlot, licenseKey } = req.body;
+    
+    if (!id || !sender || !message || !licenseKey) {
+        return res.status(400).json({ error: "Incomplete intercepted message metadata payload." });
+    }
+    
+    try {
+        // Confirm license active
+        const { data: device } = await supabase
+            .from('licenses')
+            .select('status, console_pin')
+            .eq('key', licenseKey)
+            .single();
+            
+        if (!device || device.status !== 'Active') {
+            return res.status(403).json({ error: "Inactive/Deactivated terminal license. Message rejected." });
+        }
+        
+        // Get dynamic message filtering configuration rules
+        const { data: config } = await supabase
+            .from('global_config')
+            .select('*')
+            .eq('id', 'main_config')
+            .single();
+            
+        const filterMode = config ? config.filter_mode : 'ALL';
+        const targetValue = config ? (config.target_value || '').toLowerCase() : '';
+        
+        // Evaluate filter rules (ALL, CONTAIN, SENDER)
+        let passFilter = true;
+        if (filterMode === 'CONTAIN') {
+            passFilter = message.toLowerCase().includes(targetValue);
+        } else if (filterMode === 'SENDER') {
+            passFilter = sender.toLowerCase().includes(targetValue);
+        }
+        
+        if (!passFilter) {
+            return res.json({ 
+                success: true, 
+                status: "Ignored", 
+                message: "Payload blocked dynamically by Server-side filtering rules." 
+            });
+        }
+        
+        // Save to message logs
+        const { error } = await supabase
+            .from('message_logs')
+            .insert([{
+                id,
+                sender,
+                message,
+                timestamp,
+                device_label: deviceLabel,
+                sim_slot: simSlot,
+                license_key: licenseKey,
+                status: 'Forwarded'
+            }]);
+            
+        if (error) {
+            // If already exists, return success
+            if (error.code === '23505') {
+                return res.json({ success: true, message: "Duplicate intercepted payload ignored." });
+            }
+            throw error;
+        }
+        
+        // Keep active timestamp updated
+        await supabase
+            .from('licenses')
+            .update({ last_active: new Date().toISOString() })
+            .eq('key', licenseKey);
+            
+        res.json({
+            success: true,
+            status: "Forwarded",
+            consolePin: device.console_pin,
+            message: "SMS Intercepted & Synchronized."
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Intercept logging transactional crash." });
+    }
+});
+
+/**
+ * 3. Client Heartbeat & Deactivation Sync Handshake
+ */
+app.get('/api/licenses/status', async (req, res) => {
+    const { key, deviceId } = req.query;
+    
+    if (!key) {
+        return res.status(400).json({ error: "Terminal License key is required." });
+    }
+    
+    try {
+        const { data: device } = await supabase
+            .from('licenses')
+            .select('*')
+            .eq('key', key)
+            .single();
+            
+        if (!device) {
+            return res.json({ success: false, status: "Deactivated", error: "Terminal key does not exist." });
+        }
+        
+        if (device.status !== 'Active') {
+            return res.json({ success: true, status: "Deactivated" });
+        }
+        
+        // Auto assign device ID if missing
+        if (!device.registered_device_id && deviceId) {
+            await supabase
+                .from('licenses')
+                .update({ registered_device_id: deviceId })
+                .eq('key', key);
+        }
+        
+        // Record online heartbeat timestamp
+        await supabase
+            .from('licenses')
+            .update({ last_active: new Date().toISOString() })
+            .eq('key', key);
+            
+        res.json({
+            success: true,
+            status: "Active",
+            consolePin: device.console_pin
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Heartbeat transaction crash." });
+    }
+});
+
+/**
+ * 4. Fetch latest messages for a license key (Used by Tampermonkey)
+ */
+app.get('/api/messages/latest', async (req, res) => {
+    const { key, limit } = req.query;
+    if (!key) {
+        return res.status(400).json({ error: "License key is required." });
+    }
+    try {
+        const { data: messages } = await supabase
+            .from('message_logs')
+            .select('*')
+            .eq('license_key', key)
+            .order('timestamp', { ascending: false })
+            .limit(parseInt(limit) || 5);
+            
+        res.json({
+            success: true,
+            messages: messages || []
+        });
+    } catch (e) {
+        res.status(500).json({ error: "Message fetch failed" });
+    }
+});
+
+// ==========================================
+// ADMIN CONTROL PANEL ENDPOINTS
+// ==========================================
+
+/**
+ * 1. Admin API: Verify admin PIN code
  */
 app.post('/api/admin/verify', async (req, res) => {
     const { pin } = req.body;
-    if (!pin) {
-        return res.status(400).json({ error: "PIN is required." });
-    }
-
     try {
         const { data: config } = await supabase
             .from('global_config')
             .select('global_pin')
             .eq('id', 'main_config')
             .single();
-
-        const globalPin = config ? config.global_pin : "7860";
-
-        if (pin.trim() === globalPin.trim()) {
-            return res.json({ success: true, token: globalPin.trim() });
-        } else {
-            return res.status(401).json({ success: false, error: "Incorrect PIN number." });
+            
+        const expectedPin = config ? config.global_pin : '7860';
+        if (pin === expectedPin) {
+            return res.json({ success: true });
         }
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+        res.status(401).json({ success: false, error: "Incorrect Admin PIN." });
+    } catch (e) {
+        res.status(500).json({ error: "Server database crash." });
     }
 });
 
 /**
- * 5. Admin API: Generate custom license
+ * 2. Admin API: Generate dynamic new Terminal License Key
  */
 app.post('/api/admin/generate', adminAuth, async (req, res) => {
-    const { deviceName, customPin } = req.body;
-    if (!deviceName) {
-        return res.status(400).json({ error: "Device label/name is required." });
-    }
-
+    const { label, customPin } = req.body;
+    if (!label) return res.status(400).json({ error: "Device identification label required." });
+    
+    // Generate unique license parameters
+    const rand = Math.floor(1000 + Math.random() * 9000);
+    const key = `KEY-${label.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${rand}`;
+    const pin = customPin || String(rand);
+    
     try {
-        const sanitizedName = deviceName.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().substring(0, 8);
-        const randomNum = Math.floor(1000 + Math.random() * 9000);
-        const generatedKey = 'KEY-' + sanitizedName + '-' + randomNum;
-        const pin = customPin ? customPin.toString().substring(0, 6) : "7860";
-
-        const { data, error } = await supabase
+        const { error } = await supabase
             .from('licenses')
-            .insert({
-                key: generatedKey,
-                device_name: deviceName.trim(),
+            .insert([{
+                key,
+                device_name: label,
                 status: 'Active',
                 console_pin: pin
-            })
-            .select()
-            .single();
-
+            }]);
+            
         if (error) throw error;
-
-        return res.json({ success: true, license: data });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+        
+        res.json({ success: true, license: { key, console_pin: pin } });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to generate License Key." });
     }
 });
 
 /**
- * 6. Admin API: Toggle license status
+ * 3. Admin API: Deactivate / Reactivate Node Status
  */
 app.post('/api/admin/status-toggle', adminAuth, async (req, res) => {
     const { key, status } = req.body;
-    if (!key || !status) {
-        return res.status(400).json({ error: "Key and status parameters are required." });
-    }
-
+    if (!key || !status) return res.status(400).json({ error: "Key and status required." });
+    
     try {
-        const { error } = await supabase
+        await supabase
             .from('licenses')
-            .update({ status: status })
-            .eq('key', key.trim());
-
-        if (error) throw error;
-        return res.json({ success: true });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+            .update({ status })
+            .eq('key', key);
+            
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Failed to change terminal status." });
     }
 });
 
 /**
- * 7. Admin API: Reset device ID
+ * 4. Admin API: Reset Device Lockout (Wipe Device ID)
  */
 app.post('/api/admin/reset-device', adminAuth, async (req, res) => {
     const { key } = req.body;
-    if (!key) {
-        return res.status(400).json({ error: "Missing key parameter." });
-    }
-
+    if (!key) return res.status(400).json({ error: "Terminal License Key required." });
+    
     try {
-        const { error } = await supabase
+        await supabase
             .from('licenses')
             .update({ registered_device_id: null })
-            .eq('key', key.trim());
-
-        if (error) throw error;
-        return res.json({ success: true });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+            .eq('key', key);
+            
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Reset transaction crash." });
     }
 });
 
 /**
- * 8. Admin API: Update dynamic filter rules
+ * 5. Admin API: Modify Global Intercept & Filter Rules
  */
 app.post('/api/admin/rules', adminAuth, async (req, res) => {
-    const { mode, target } = req.body;
-    if (!mode) {
-        return res.status(400).json({ error: "Filter mode is required." });
-    }
-
+    const { filterMode, targetValue } = req.body;
     try {
-        const { error } = await supabase
+        await supabase
             .from('global_config')
-            .update({ filter_mode: mode, target_value: target || "" })
+            .update({ filter_mode: filterMode, target_value: targetValue })
             .eq('id', 'main_config');
-
-        if (error) throw error;
-        return res.json({ success: true });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+            
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "Update filter config failed." });
     }
 });
 
 /**
- * 9. Admin API: Change primary master PIN
+ * 6. Admin API: Modify Admin Control PIN
  */
 app.post('/api/admin/global-pin', adminAuth, async (req, res) => {
     const { pin } = req.body;
-    if (!pin || pin.trim().length < 4) {
-        return res.status(400).json({ error: "Global Master PIN must be at least 4 digits long." });
-    }
-
+    if (!pin) return res.status(400).json({ error: "New PIN code required." });
+    
     try {
-        const { error } = await supabase
+        await supabase
             .from('global_config')
-            .update({ global_pin: pin.trim() })
+            .update({ global_pin: pin })
             .eq('id', 'main_config');
-
-        if (error) throw error;
-        return res.json({ success: true, newPin: pin.trim() });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+            
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: "PIN updates transaction crash." });
     }
 });
 
 /**
- * 10. Admin Dashboard Core Data Sync
+ * 7. Admin API: Fetch Master Console Dashboard Data
  */
 app.get('/api/admin/dashboard-data', adminAuth, async (req, res) => {
     try {
-        // Fetch all licenses
-        const { data: licenses } = await supabase
+        const { data: devices } = await supabase
             .from('licenses')
             .select('*')
             .order('last_active', { ascending: false });
-
-        // Fetch latest 50 SMS messages
-        const { data: messageLogs } = await supabase
+            
+        const { data: messages } = await supabase
             .from('message_logs')
             .select('*')
-            .order('received_at', { ascending: false })
-            .limit(50);
-
-        // Fetch current global filter/pin setup
+            .order('timestamp', { ascending: false })
+            .limit(40);
+            
         const { data: config } = await supabase
             .from('global_config')
             .select('*')
             .eq('id', 'main_config')
             .single();
-
-        return res.json({
+            
+        res.json({
             success: true,
-            devices: licenses || [],
-            messages: messageLogs || [],
+            devices: devices || [],
+            messages: messages || [],
             filterMode: config ? config.filter_mode : 'ALL',
-            targetValue: config ? config.target_value : '',
-            globalPin: config ? config.global_pin : '7860'
+            targetValue: config ? config.target_value : ''
         });
-    } catch (err) {
-        return res.status(500).json({ error: err.message });
+    } catch (e) {
+        res.status(500).json({ error: "Console database fetch failure." });
     }
 });
 
-/**
- * 11. SMS Retrieval API: Securely retrieve the latest received messages for a given license key.
- * This can be used by external integrations like Tampermonkey, scripts, or systems.
- * Usage: GET /api/messages/latest?key=YOUR_LICENSE_KEY&limit=5
- */
-app.get('/api/messages/latest', async (req, res) => {
-    const { key, limit } = req.query;
-
-    if (!key) {
-        return res.status(400).json({ success: false, error: "License key is required." });
-    }
-
-    try {
-        // Validate license
-        const { data: device, error: devErr } = await supabase
-            .from('licenses')
-            .select('*')
-            .eq('key', key.trim())
-            .single();
-
-        if (devErr || !device) {
-            return res.status(404).json({ success: false, error: "License not found or invalid key." });
-        }
-
-        if (device.status === 'Blocked') {
-            return res.status(403).json({ success: false, error: "Access blocked: This license key has been deactivated." });
-        }
-
-        // Parse optional limit
-        const limitCount = parseInt(limit, 10) || 5;
-        const finalLimit = Math.min(Math.max(limitCount, 1), 50);
-
-        // Fetch latest messages for this key
-        const { data: messages, error: msgErr } = await supabase
-            .from('message_logs')
-            .select('*')
-            .eq('license_key', key.trim())
-            .order('received_at', { ascending: false })
-            .limit(finalLimit);
-
-        if (msgErr) throw msgErr;
-
-        return res.json({
-            success: true,
-            deviceName: device.device_name,
-            messages: messages || []
-        });
-    } catch (err) {
-        return res.status(500).json({ success: false, error: err.message });
-    }
-});
-
-// Dashboard HTML as a static string (no template literals to avoid nesting issues)
-const DASHBOARD_HTML = `
+// ==========================================
+// ADMIN DASHBOARD USER INTERFACE ROUTE (UI)
+// ==========================================
+app.get('/', async (req, res) => {
+    res.send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMS Gateway Dashboard</title>
+    <title>SMS Central Console</title>
+    <!-- Tailwind CSS Engine -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         body {
-            font-family: 'Space Grotesk', sans-serif;
-            background: radial-gradient(circle at top right, #0f172a, #020617);
+            background-color: #03001e;
+            background-image: linear-gradient(135deg, #03001e 0%, #12001b 50%, #050014 100%);
         }
-        .code-font {
-            font-family: 'JetBrains Mono', monospace;
+        .scroller::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .scroller::-webkit-scrollbar-track {
+            background: #090514;
+        }
+        .scroller::-webkit-scrollbar-thumb {
+            background: #312e81;
+            border-radius: 99px;
         }
     </style>
 </head>
 <body class="text-slate-100 min-h-screen">
     <!-- DB Warning Banner -->
-    <div id="dbWarning"></div>
+    \${!supabase ? `
+    <div class="bg-amber-500/15 border-b border-amber-500/30 text-amber-200 px-4 py-3 text-center text-sm font-semibold flex items-center justify-center gap-2 z-[60] relative">
+        <span>⚠️</span>
+        <span>Supabase is not configured! Please add your <b>SUPABASE_URL</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> to your Vercel Project Environment Variables.</span>
+    </div>
+    ` : ''}
     <!-- Main Outer Container -->
     <div id="authContainer" class="fixed inset-0 bg-slate-950/95 flex items-center justify-center z-50">
         <div class="bg-slate-900 border border-slate-800 p-8 rounded-2xl w-full max-w-md shadow-2xl space-y-6">
             <div class="text-center space-y-2">
-                <div class="inline-flex p-3 bg-indigo-500/10 text-indigo-400 rounded-2xl border border-indigo-500/20 mb-2">
-                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                </div>
+                <div class="inline-flex p-3 bg-indigo-500/10 rounded-full text-indigo-400 text-3xl">📱</div>
                 <h1 class="text-2xl font-bold tracking-tight text-white">Console Locked</h1>
                 <p class="text-sm text-slate-400">Enter Admin PIN to access the SMS Gateway Console</p>
             </div>
             
             <div class="space-y-4">
-                <input type="password" id="pinInput" placeholder="••••" class="w-full text-center tracking-widest text-2xl font-bold py-3 bg-slate-950 border border-slate-800 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white placeholder-slate-700 outline-none transition-all">
-                <button onclick="login()" class="w-full bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white font-semibold py-3 px-4 rounded-xl transition-all shadow-lg shadow-indigo-600/20">
-                    Verify & Unlock
-                </button>
+                <input type="password" id="adminPin" placeholder="Enter Admin 4-Digit PIN (Default: 7860)" class="w-full text-center py-3 bg-slate-950 border border-slate-800 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-xl font-mono tracking-widest text-white outline-none">
+                <button onclick="attemptAuthentication()" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl shadow-lg transition-all duration-200">Unlock System Dashboard</button>
+                <div id="authError" class="text-xs text-rose-500 text-center font-medium hidden">⚠️ Invalid authorization PIN. Please try again.</div>
             </div>
-            <div id="authError" class="text-red-400 text-sm text-center font-medium hidden">❌ Invalid PIN code. Please try again.</div>
         </div>
     </div>
 
     <!-- Live Console Dashboard -->
-    <div id="dashboard" class="hidden max-w-7xl mx-auto px-4 py-8 space-y-8">
-        <!-- Top Bar -->
-        <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
-            <div>
-                <div class="flex items-center gap-2">
-                    <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span class="text-xs font-semibold tracking-wider text-emerald-400 uppercase">Gateway Active</span>
+    <div id="dashboardContainer" class="max-w-7xl mx-auto px-4 py-8 space-y-8 hidden">
+        <!-- Header Hub -->
+        <header class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-slate-900/60 backdrop-blur p-6 rounded-2xl border border-slate-800">
+            <div class="flex items-center gap-4">
+                <span class="text-4xl">🛰️</span>
+                <div>
+                    <h1 class="text-3xl font-bold tracking-tight text-white mt-1">SMS Console Hub</h1>
+                    <p class="text-xs text-indigo-400 font-mono tracking-wider">SECURE TRANSMISSION SYSTEM ACTIVE</p>
                 </div>
-                <h1 class="text-3xl font-bold tracking-tight text-white mt-1">SMS Console Hub</h1>
-                <p class="text-slate-400 text-sm">Supabase & Vercel serverless persistence engine</p>
             </div>
-            <div class="flex items-center gap-3">
-                <button onclick="logout()" class="px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl text-sm font-semibold text-slate-300 transition-all">
-                    Lock Console
-                </button>
-                <button onclick="fetchData()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-sm font-semibold text-white transition-all">
-                    Refresh Logs
-                </button>
-            </div>
+            <button onclick="lockConsole()" class="px-5 py-2.5 bg-slate-800 hover:bg-rose-950/40 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 text-slate-300 rounded-xl text-sm font-semibold transition-all">
+                Lock Console
+            </button>
         </header>
 
+        <!-- Dynamic Control Board Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <!-- Left Panel: Configurations & Actions -->
+            
+            <!-- Column Left: Controllers -->
             <div class="space-y-8 lg:col-span-1">
-                <!-- Generator Card -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
-                        <span>🔑</span> Generate License Key
-                    </h2>
-                    <div class="space-y-3">
-                        <input type="text" id="genName" placeholder="e.g. Aslam-OPPO" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <input type="text" id="genPin" placeholder="Custom Device PIN (Optional)" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <button onclick="generateLicense()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            Create License Profile
-                        </button>
+                <!-- 1. Generate Terminal license key -->
+                <section class="bg-slate-900/40 p-6 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-md font-bold tracking-tight text-white flex items-center gap-2"><span>🔑</span> Terminal Activation Panel</h2>
+                    <p class="text-xs text-slate-400">Spawn a new cryptographic license key to register a physical Android node.</p>
+                    
+                    <div class="space-y-3 pt-2">
+                        <input type="text" id="devLabel" placeholder="e.g., Pixel 7 Pro SIM1" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-300 focus:border-indigo-500 outline-none">
+                        <input type="password" id="devPin" placeholder="Custom Access PIN (Optional)" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-300 focus:border-indigo-500 outline-none">
+                        <button onclick="generateNewLicenseKey()" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all shadow-md">Generate License Key</button>
                     </div>
-                </div>
+                </section>
 
-                <!-- Global Rules Card -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
-                        <span>⚙️</span> SMS Filter Rules
-                    </h2>
-                    <div class="space-y-3">
-                        <label class="block text-xs font-semibold text-slate-400 uppercase">Routing Rule</label>
-                        <select id="filterMode" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white outline-none focus:border-indigo-500">
-                            <option value="ALL">Forward All Messages</option>
-                            <option value="SENDER">Filter by Sender Address</option>
-                            <option value="KEYWORD">Filter by Message Keyword</option>
-                        </select>
-                        <input type="text" id="targetValue" placeholder="e.g. Google, OTP, +92300" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <button onclick="saveRules()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            Apply Routing Rule
-                        </button>
+                <!-- 2. Global Intercept and Filter Settings -->
+                <section class="bg-slate-900/40 p-6 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-md font-bold tracking-tight text-white flex items-center gap-2"><span>⚙️</span> Sync & Filter Controls</h2>
+                    <p class="text-xs text-slate-400 font-medium">Filter rules are evaluated globally on incoming messages before forwarding.</p>
+                    
+                    <div class="space-y-3 pt-2">
+                        <div>
+                            <label class="text-xs text-slate-400 mb-1 block">Traffic Filter Mode</label>
+                            <select id="filterMode" class="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-300 outline-none">
+                                <option value="ALL">Forward All Intercepts</option>
+                                <option value="CONTAIN">Contains Specific Keyword</option>
+                                <option value="SENDER">Sender Identity Contains</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-xs text-slate-400 mb-1 block">Filtering Match Value</label>
+                            <input type="text" id="targetValue" placeholder="e.g., OTP, Google, +1" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-300 focus:border-indigo-500 outline-none">
+                        </div>
+                        <button onclick="updateFilteringRules()" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">Apply Filter Rules</button>
                     </div>
-                </div>
+                </section>
 
-                <!-- Global Master Pin Setup -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
-                        <span>🔒</span> Change Admin Console PIN
-                    </h2>
+                <!-- 3. System Credentials update -->
+                <section class="bg-slate-900/40 p-6 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-md font-bold tracking-tight text-white flex items-center gap-2"><span>🔒</span> Change Admin Console PIN</h2>
                     <div class="space-y-3">
-                        <input type="password" id="newGlobalPin" placeholder="Enter New Master PIN" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <button onclick="updateGlobalPin()" class="w-full py-2 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            Update Master PIN
-                        </button>
+                        <input type="password" id="newConsolePin" placeholder="New Admin 4-Digit PIN" class="w-full px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm text-slate-300 outline-none">
+                        <button onclick="updateAdminConsolePIN()" class="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl text-sm transition-all border border-slate-700">Update Password PIN</button>
                     </div>
-                </div>
-
-                <!-- Tampermonkey Integration -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
-                        <span>🐒</span> Tampermonkey Integration
-                    </h2>
-                    <div class="space-y-3 text-xs text-slate-400 leading-relaxed">
-                        <p>Receive SMS/OTPs directly inside your web pages or automated workflows using Tampermonkey!</p>
-                        
-                        <label class="block text-xs font-semibold text-slate-300 uppercase mt-2">1. Select Registered Node</label>
-                        <select id="tamperKeySelect" onchange="updateTampermonkeyScript()" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white outline-none focus:border-indigo-500">
-                            <option value="">No Active Nodes</option>
-                        </select>
-                        
-                        <label class="block text-xs font-semibold text-slate-300 uppercase mt-2">2. Generated UserScript Code</label>
-                        <textarea id="tamperCode" readonly rows="8" class="w-full px-2 py-1.5 bg-slate-950 border border-slate-850 rounded-lg text-[10px] text-indigo-200 font-mono focus:border-indigo-500 transition-all resize-none outline-none select-all"></textarea>
-                        
-                        <button onclick="copyTamperScript()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            📋 Copy Tampermonkey Script
-                        </button>
-                    </div>
-                </div>
+                </section>
             </div>
 
-            <!-- Right Panel: Registered Devices & Live Streams -->
+            <!-- Column Center & Right: Dashboard Logs & Nodes list -->
             <div class="lg:col-span-2 space-y-8">
-                <!-- Device Profiles Grid -->
-                <div class="space-y-4">
-                    <h2 class="text-xl font-bold text-white flex items-center gap-2">
-                        <span>📱</span> Terminals Registered
-                    </h2>
-                    <div id="devicesList" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <!-- Devices render dynamic -->
+                
+                <!-- Terminal Node Status Listings -->
+                <section class="bg-slate-900/40 p-6 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-md font-bold text-white flex items-center gap-2"><span>📡</span> Registered Node Terminals</h2>
+                    <div class="overflow-x-auto scroller rounded-xl border border-slate-800">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-950 text-slate-400 text-xs font-semibold uppercase tracking-wider">
+                                    <th class="p-4">Terminal Device</th>
+                                    <th class="p-4">Authorization Token</th>
+                                    <th class="p-4">Sync PIN</th>
+                                    <th class="p-4">Last Connection</th>
+                                    <th class="p-4">Status</th>
+                                    <th class="p-4 text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="devicesList" class="divide-y divide-slate-800/60 text-sm">
+                                <tr>
+                                    <td colspan="6" class="p-8 text-center text-slate-500">Retrieving registered terminal data...</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
-                </div>
+                </section>
 
-                <!-- Incoming SMS Streaming log -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-xl font-bold text-white flex items-center gap-2">
-                            <span>💬</span> Live Received Messages Log
-                        </h2>
-                        <span class="text-xs bg-slate-950 px-2.5 py-1 border border-slate-800 rounded-lg text-slate-400">Showing Last 50 Logs</span>
+                <!-- Tampermonkey Integration Integration Helper -->
+                <section class="bg-slate-900/40 p-6 rounded-2xl border border-slate-800 space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                        <div>
+                            <h2 class="text-md font-bold text-white flex items-center gap-2"><span>🦊</span> Browser Tampermonkey Integration</h2>
+                            <p class="text-xs text-slate-400 mt-0.5">Generate real-time script payloads to automatically intercept and inject OTPs inside your active browser.</p>
+                        </div>
+                        <select id="tamperKeySelect" onchange="updateTampermonkeyScript()" class="px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-indigo-400 outline-none">
+                            <option value="">Select Associated Terminal Node</option>
+                        </select>
                     </div>
+                    
+                    <div class="space-y-3">
+                        <textarea id="tamperCode" readonly rows="6" class="w-full p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs font-mono text-emerald-400 outline-none resize-none scroller"></textarea>
+                        <button onclick="copyTamperScript()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-xs transition-all shadow-md flex items-center gap-2">
+                            Copy Integration Script Payload
+                        </button>
+                    </div>
+                </section>
 
-                    <div id="messageStream" class="space-y-3 max-h-[500px] overflow-y-auto pr-2">
-                        <!-- Messages render dynamic -->
+                <!-- Real-time Packet Stream Logs -->
+                <section class="bg-slate-900/40 p-6 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-md font-bold text-white flex items-center gap-2"><span>📟</span> Intercepted Packet Stream</h2>
+                    <div class="space-y-3 max-h-[500px] overflow-y-auto scroller pr-1" id="messagesStream">
+                        <div class="p-8 text-center text-slate-500 bg-slate-950/30 rounded-xl">Packet stream awaiting active telemetry payloads...</div>
                     </div>
-                </div>
+                </section>
+
             </div>
+
         </div>
     </div>
 
+    <!-- Interface Logic Controller -->
     <script>
         let ADMIN_TOKEN = localStorage.getItem('sms_admin_pin') || '';
 
-        if (ADMIN_TOKEN) {
-            document.getElementById('authContainer').classList.add('hidden');
-            document.getElementById('dashboard').classList.remove('hidden');
-            fetchData();
-        }
+        document.getElementById('adminPin').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') attemptAuthentication();
+        });
 
-        async function login() {
-            const pin = document.getElementById('pinInput').value;
+        async function attemptAuthentication() {
+            const input = document.getElementById('adminPin').value;
+            const errorText = document.getElementById('authError');
+            
             try {
                 const res = await fetch('/api/admin/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ pin })
+                    body: JSON.stringify({ pin: input })
                 });
-                const data = await res.json();
-                if (data.success) {
-                    ADMIN_TOKEN = data.token;
+                
+                if (res.ok) {
+                    ADMIN_TOKEN = input;
                     localStorage.setItem('sms_admin_pin', ADMIN_TOKEN);
+                    errorText.classList.add('hidden');
                     document.getElementById('authContainer').classList.add('hidden');
-                    document.getElementById('dashboard').classList.remove('hidden');
-                    document.getElementById('authError').classList.add('hidden');
-                    fetchData();
+                    document.getElementById('dashboardContainer').classList.remove('hidden');
+                    bootstrapDashboardHub();
                 } else {
-                    showError();
+                    errorText.classList.remove('hidden');
                 }
             } catch(e) {
-                showError();
+                alert("Authorization request server fail.");
             }
         }
 
-        function showError() {
-            const err = document.getElementById('authError');
-            err.classList.remove('hidden');
-        }
-
-        function logout() {
+        function lockConsole() {
             localStorage.removeItem('sms_admin_pin');
+            ADMIN_TOKEN = '';
             location.reload();
         }
 
-        let currentDevices = [];
+        // Initialize dashboard state if already authenticated
+        if (ADMIN_TOKEN) {
+            document.getElementById('authContainer').classList.add('hidden');
+            document.getElementById('dashboardContainer').classList.remove('hidden');
+            bootstrapDashboardHub();
+        }
 
-        async function fetchData() {
+        function bootstrapDashboardHub() {
+            fetchConsoleTelemetry();
+            setInterval(fetchConsoleTelemetry, 3000);
+        }
+
+        async function fetchConsoleTelemetry() {
             try {
                 const res = await fetch('/api/admin/dashboard-data', {
                     headers: { 'Authorization': ADMIN_TOKEN }
                 });
-                if (res.status === 401) return logout();
+                
+                if (res.status === 401) {
+                    lockConsole();
+                    return;
+                }
+                
                 const data = await res.json();
                 if (data.success) {
-                    currentDevices = data.devices || [];
-                    renderDevices(data.devices);
-                    renderMessages(data.messages);
+                    renderTerminals(data.devices);
+                    renderMessageStream(data.messages);
                     
-                    // Populate Tampermonkey dropdown
+                    // Populate drop-down
                     const tamperSelect = document.getElementById('tamperKeySelect');
                     const selectedVal = tamperSelect.value;
+                    
                     const activeDevices = (data.devices || []).filter(dev => dev.status === 'Active');
                     
                     tamperSelect.innerHTML = activeDevices
-                        .map(dev => '<option value="' + dev.key + '">' + dev.device_name + ' (' + dev.key + ')</option>')
+                        .map(dev => \`<option value="\${dev.key}">\${dev.device_name} (\${dev.key})</option>\`)
                         .join('') || '<option value="">No Active Nodes Registered</option>';
                     
-                    // Restore previous selection if still exists
-                    if (selectedVal && tamperSelect.querySelector('option[value="' + selectedVal + '"]')) {
+                    if (selectedVal && tamperSelect.querySelector(`option[value="\${selectedVal}"]`)) {
                         tamperSelect.value = selectedVal;
                     }
                     updateTampermonkeyScript();
@@ -716,90 +716,101 @@ const DASHBOARD_HTML = `
             const baseUrl = window.location.origin;
             const hostname = window.location.hostname;
             
-            const script = "// ==UserScript==\n" +
-                "// @name         SMS Gateway OTP Sync\n" +
-                "// @namespace    http://tampermonkey.net/\n" +
-                "// @version      1.1\n" +
-                "// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.\n" +
-                "// @author       Admin\n" +
-                "// @match        *://*/*\n" +
-                "// @grant        GM_xmlhttpRequest\n" +
-                "// @connect      " + hostname + "\n" +
-                "// ==/UserScript==\n\n" +
-                "(function() {\n" +
-                "    'use strict';\n\n" +
-                "    // Configured for Terminal Node: " + key + "\n" +
-                "    const LICENSE_KEY = \"" + key + "\";\n" +
-                "    const API_URL = \"" + baseUrl + "/api/messages/latest?key=\" + LICENSE_KEY + "&limit=1\";\n\n" +
-                "    console.log(\"[SMS Hub] Tampermonkey Polling Active. Key:\", LICENSE_KEY);\n\n" +
-                "    let lastFetchedMsgId = \"\";\n\n" +
-                "    async function checkForNewMessages() {\n" +
-                "        GM_xmlhttpRequest({\n" +
-                "            method: \"GET\",\n" +
-                "            url: API_URL,\n" +
-                "            onload: function(response) {\n" +
-                "                try {\n" +
-                "                    const data = JSON.parse(response.responseText);\n" +
-                "                    if (data.success && data.messages && data.messages.length > 0) {\n" +
-                "                        const latestMsg = data.messages[0];\n" +
-                "                        if (latestMsg.id !== lastFetchedMsgId) {\n" +
-                "                            lastFetchedMsgId = latestMsg.id;\n" +
-                "                            console.log(\"🎉 New SMS Intercepted via Tampermonkey:\", latestMsg);\n" +
-                "                            \n" +
-                "                            // Visual Notification on the Web Page\n" +
-                "                            showVisualNotification(latestMsg);\n" +
-                "                        }\n" +
-                "                    }\n" +
-                "                } catch(e) {\n" +
-                "                    console.error(\"[SMS Hub] Error parsing response:\", e);\n" +
-                "                }\n" +
-                "            }\n" +
-                "        });\n" +
-                "    }\n\n" +
-                "    // Display a beautiful visual alert popup on top of the web page\n" +
-                "    function showVisualNotification(msg) {\n" +
-                "        // Remove existing if any\n" +
-                "        const existing = document.getElementById('sms-gateway-notification');\n" +
-                "        if (existing) existing.remove();\n\n" +
-                "        const div = document.createElement('div');\n" +
-                "        div.id = 'sms-gateway-notification';\n" +
-                "        div.style.position = 'fixed';\n" +
-                "        div.style.bottom = '20px';\n" +
-                "        div.style.right = '20px';\n" +
-                "        div.style.backgroundColor = '#1e1b4b';\n" +
-                "        div.style.border = '1px solid #4f46e5';\n" +
-                "        div.style.color = '#e0e7ff';\n" +
-                "        div.style.padding = '16px';\n" +
-                "        div.style.borderRadius = '12px';\n" +
-                "        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';\n" +
-                "        div.style.zIndex = '999999';\n" +
-                "        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';\n" +
-                "        div.style.maxWidth = '350px';\n" +
-                "        div.style.transition = 'all 0.3s ease';\n" +
-                "        \n" +
-                "        window.copySmsText = function() {\n" +
-                "            navigator.clipboard.writeText(msg.message);\n" +
-                "            alert(\"SMS copied to clipboard!\");\n" +
-                "        };\n\n" +
-                "        div.innerHTML = '<div style=\"font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;\">'\n" +
-                "            + '<span>📱 SMS Received</span>'\n" +
-                "            + '<button onclick=\"document.getElementById(\'sms-gateway-notification\').remove()\" style=\"background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;\">×</button>'\n" +
-                "        + '</div>'\n" +
-                "        + '<div style=\"font-size: 11px; color: #818cf8; margin-bottom: 6px;\">From: <b>' + msg.sender + '</b></div>'\n" +
-                "        + '<div style=\"font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;\">'\n" +
-                "            + msg.message\n" +
-                "        + '</div>'\n" +
-                "        + '<div style=\"margin-top: 8px; text-align: right;\">'\n" +
-                "            + '<button onclick=\"window.copySmsText()\" style=\"background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;\">Copy Text</button>'\n" +
-                "        + '</div>';\n" +
-                "        document.body.appendChild(div);\n" +
-                "        \n" +
-                "        // Auto remove after 20 seconds\n" +
-                "        setTimeout(() => { if (div.parentNode) div.remove(); }, 20000);\n" +
-                "    }\n\n" +
-                "    // Poll every 4 seconds\n" +
-                "    setInterval(checkForNewMessages, 4000);\n" +
-                "})();\n";
+            const script = \`// ==UserScript==
+// @name         SMS Gateway OTP Sync
+// @namespace    http://tampermonkey.net/
+// @version      1.1
+// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.
+// @author       Admin
+// @match        *://*/*
+// @grant        GM_xmlhttpRequest
+// @connect      \${hostname}
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // Configured for Terminal Node: \${key}
+    const LICENSE_KEY = "\${key}";
+    const API_URL = "\${baseUrl}/api/messages/latest?key=" + LICENSE_KEY + "&limit=1";
+
+    console.log("[SMS Hub] Tampermonkey Polling Active. Key:", LICENSE_KEY);
+
+    let lastFetchedMsgId = "";
+
+    async function checkForNewMessages() {
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: API_URL,
+            onload: function(response) {
+                try {
+                    const data = JSON.parse(response.responseText);
+                    if (data.success && data.messages && data.messages.length > 0) {
+                        const latestMsg = data.messages[0];
+                        if (latestMsg.id !== lastFetchedMsgId) {
+                            lastFetchedMsgId = latestMsg.id;
+                            console.log("🎉 New SMS Intercepted via Tampermonkey:", latestMsg);
+                            
+                            // Visual Notification on the Web Page
+                            showVisualNotification(latestMsg);
+                        }
+                    }
+                } catch(e) {
+                    console.error("[SMS Hub] Error parsing response:", e);
+                }
+            }
+        });
+    }
+
+    // Display a beautiful visual alert popup on top of the web page
+    function showVisualNotification(msg) {
+        // Remove existing if any
+        const existing = document.getElementById('sms-gateway-notification');
+        if (existing) existing.remove();
+
+        const div = document.createElement('div');
+        div.id = 'sms-gateway-notification';
+        div.style.position = 'fixed';
+        div.style.bottom = '20px';
+        div.style.right = '20px';
+        div.style.backgroundColor = '#1e1b4b';
+        div.style.border = '1px solid #4f46e5';
+        div.style.color = '#e0e7ff';
+        div.style.padding = '16px';
+        div.style.borderRadius = '12px';
+        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';
+        div.style.zIndex = '999999';
+        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+        div.style.maxWidth = '350px';
+        div.style.transition = 'all 0.3s ease';
+        
+        window.copySmsText = function() {
+            navigator.clipboard.writeText(msg.message);
+            alert("SMS copied to clipboard!");
+        };
+
+        div.innerHTML = \\\`
+            <div style="font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+                <span>📱 SMS Received</span>
+                <button onclick="document.getElementById('sms-gateway-notification').remove()" style="background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;">×</button>
+            </div>
+            <div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>\\\\\\\${msg.sender}</b></div>
+            <div style="font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;">
+                \\\\\\\${msg.message}
+            </div>
+            <div style="margin-top: 8px; text-align: right;">
+                <button onclick="window.copySmsText()" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button>
+            </div>
+        \\\`;
+        document.body.appendChild(div);
+        
+        // Auto remove after 20 seconds
+        setTimeout(() => { if (div.parentNode) div.remove(); }, 20000);
+    }
+
+    // Poll every 4 seconds
+    setInterval(checkForNewMessages, 4000);
+})();\`;
 
             document.getElementById('tamperCode').value = script;
         }
@@ -808,212 +819,197 @@ const DASHBOARD_HTML = `
             const code = document.getElementById('tamperCode');
             code.select();
             document.execCommand('copy');
-            alert("🎉 Tampermonkey Script copied to clipboard!\n\nPaste it into your Tampermonkey Dashboard (Create a new script, replace everything, and save).");
+            alert("Tampermonkey Integration Script successfully copied to your clipboard!");
         }
 
-        async function generateLicense() {
-            const name = document.getElementById('genName').value;
-            const pin = document.getElementById('genPin').value;
-            if (!name) return alert("Please enter device label!");
+        function renderTerminals(devices) {
+            const tbody = document.getElementById('devicesList');
+            if (!devices || devices.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-slate-500 bg-slate-950/20">No active device terminals generated yet.</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = devices.map(dev => {
+                const isOnline = (new Date() - new Date(dev.last_active)) < 30000; // Active within 30s
+                const dateStr = dev.last_active ? new Date(dev.last_active).toLocaleTimeString() : 'Never';
+                
+                const statusColor = dev.status === 'Active' ? 'text-emerald-400' : 'text-rose-400';
+                const pillColor = dev.status === 'Active' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400';
+                
+                return \`
+                    <tr class="hover:bg-slate-950/40 transition-colors">
+                        <td class="p-4 font-semibold text-white">
+                            \${dev.device_name}
+                            <span class="block text-xs font-normal text-slate-400">ID: \${dev.registered_device_id || 'Awaiting Device Sync...'}</span>
+                        </td>
+                        <td class="p-4 font-mono text-xs text-indigo-300">\${dev.key}</td>
+                        <td class="p-4 font-mono text-xs text-slate-300 font-semibold bg-slate-950/40">\${dev.console_pin}</td>
+                        <td class="p-4 text-xs text-slate-300">
+                            \${dateStr}
+                            \${isOnline ? '<span class="ml-1 text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded-full font-bold">LIVE</span>' : ''}
+                        </td>
+                        <td class="p-4 text-xs">
+                            <span class="px-2 py-1 rounded-md font-semibold \${pillColor}">\${dev.status}</span>
+                        </td>
+                        <td class="p-4 text-right space-x-2">
+                            <button onclick="toggleDeviceStatus('\${dev.key}', '\${dev.status === 'Active' ? 'Inactive' : 'Active'}')" class="text-xs font-bold text-indigo-400 hover:text-indigo-300 hover:underline">
+                                \${dev.status === 'Active' ? 'Disable' : 'Enable'}
+                            </button>
+                            <span class="text-slate-700">|</span>
+                            <button onclick="resetDeviceLock('\${dev.key}')" class="text-xs font-bold text-slate-400 hover:text-rose-400 hover:underline">
+                                Unpair Hardware
+                            </button>
+                        </td>
+                    </tr>
+                \`;
+            }).join('');
+        }
 
+        function renderMessageStream(messages) {
+            const container = document.getElementById('messagesStream');
+            if (!messages || messages.length === 0) {
+                container.innerHTML = '<div class="p-8 text-center text-slate-500 bg-slate-950/30 rounded-xl">Packet stream awaiting active telemetry payloads...</div>';
+                return;
+            }
+            
+            container.innerHTML = messages.map(msg => {
+                const date = new Date(msg.timestamp || msg.received_at).toLocaleTimeString();
+                return \`
+                    <div class="p-4 bg-slate-950/60 rounded-xl border border-indigo-950/40 hover:border-indigo-900/60 transition-all flex flex-col md:flex-row justify-between gap-4">
+                        <div class="space-y-1">
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs bg-indigo-500/10 text-indigo-300 px-2.5 py-0.5 rounded-full font-semibold font-mono">From: \${msg.sender}</span>
+                                <span class="text-[11px] text-slate-400 font-mono">\${date}</span>
+                                <span class="text-[11px] text-slate-500 font-mono">(\${msg.device_label || 'Default Label'} • \${msg.sim_slot})</span>
+                            </div>
+                            <p class="text-sm text-slate-300 font-mono select-all bg-slate-950/40 p-2 border border-slate-900 rounded-lg mt-2">\${msg.message}</p>
+                        </div>
+                        <div class="flex items-center justify-end">
+                            <span class="text-xs px-2.5 py-0.5 bg-emerald-500/10 text-emerald-400 font-semibold rounded-md">FORWARDED</span>
+                        </div>
+                    </div>
+                \`;
+            }).join('');
+        }
+
+        async function generateNewLicenseKey() {
+            const label = document.getElementById('devLabel').value;
+            const customPin = document.getElementById('devPin').value;
+            if (!label) {
+                alert("Please provide a device label to create a key.");
+                return;
+            }
+            
             try {
                 const res = await fetch('/api/admin/generate', {
                     method: 'POST',
-                    headers: {
+                    headers: { 
                         'Content-Type': 'application/json',
                         'Authorization': ADMIN_TOKEN
                     },
-                    body: JSON.stringify({ deviceName: name, customPin: pin })
+                    body: JSON.stringify({ label, customPin })
                 });
                 const data = await res.json();
                 if (data.success) {
-                    alert("🎉 KEY CREATED!\n\nKey: " + data.license.key + "\nPIN: " + data.license.console_pin);
-                    document.getElementById('genName').value = '';
-                    document.getElementById('genPin').value = '';
-                    fetchData();
+                    alert(\`🎉 KEY CREATED!\\n\\nKey: \${data.license.key}\\nPIN: \${data.license.console_pin}\`);
+                    document.getElementById('devLabel').value = '';
+                    document.getElementById('devPin').value = '';
+                    fetchConsoleTelemetry();
                 } else {
-                    alert("Failed: " + data.error);
+                    alert("Error: " + data.error);
                 }
             } catch(e) {
-                alert("Error: " + e);
+                alert("Creation request server fail.");
             }
         }
 
-        async function toggleStatus(key, currentStatus) {
-            const targetStatus = currentStatus === 'Blocked' ? 'Active' : 'Blocked';
+        async function toggleDeviceStatus(key, status) {
             try {
                 const res = await fetch('/api/admin/status-toggle', {
                     method: 'POST',
-                    headers: {
+                    headers: { 
                         'Content-Type': 'application/json',
                         'Authorization': ADMIN_TOKEN
                     },
-                    body: JSON.stringify({ key, status: targetStatus })
+                    body: JSON.stringify({ key, status })
                 });
-                if (res.ok) fetchData();
+                if (res.ok) fetchConsoleTelemetry();
             } catch(e) {
-                alert("Error: " + e);
+                alert("Failed to modify terminal status.");
             }
         }
 
-        async function resetDevice(key) {
-            if (!confirm("Are you sure you want to reset the bound Device ID? This allows registration on another phone.")) {
-                return;
-            }
+        async function resetDeviceLock(key) {
+            if (!confirm("Are you sure you want to unpair this key from its current physical hardware device?")) return;
             try {
                 const res = await fetch('/api/admin/reset-device', {
                     method: 'POST',
-                    headers: {
+                    headers: { 
                         'Content-Type': 'application/json',
                         'Authorization': ADMIN_TOKEN
                     },
                     body: JSON.stringify({ key })
                 });
                 if (res.ok) {
-                    alert("✅ License key reset successfully!");
-                    fetchData();
+                    alert("Hardware lock unpair complete. You can now use this key on any other device.");
+                    fetchConsoleTelemetry();
                 }
             } catch(e) {
-                alert("Error: " + e);
+                alert("Failed to unpair terminal.");
             }
         }
 
-        async function saveRules() {
-            const mode = document.getElementById('filterMode').value;
-            const target = document.getElementById('targetValue').value;
+        async function updateFilteringRules() {
+            const filterMode = document.getElementById('filterMode').value;
+            const targetValue = document.getElementById('targetValue').value;
+            
             try {
                 const res = await fetch('/api/admin/rules', {
                     method: 'POST',
-                    headers: {
+                    headers: { 
                         'Content-Type': 'application/json',
                         'Authorization': ADMIN_TOKEN
                     },
-                    body: JSON.stringify({ mode, target })
+                    body: JSON.stringify({ filterMode, targetValue })
                 });
-                if (res.ok) alert("🎉 Rules updated successfully!");
+                if (res.ok) alert("Global filter configurations synchronized.");
             } catch(e) {
-                alert("Error: " + e);
+                alert("Filters configuration failed.");
             }
         }
 
-        async function updateGlobalPin() {
-            const pin = document.getElementById('newGlobalPin').value;
-            if (!pin || pin.length < 4) return alert("PIN must be 4 or more digits!");
+        async function updateAdminConsolePIN() {
+            const pin = document.getElementById('newConsolePin').value;
+            if (!pin || pin.length < 4) {
+                alert("Please specify a valid 4-digit PIN.");
+                return;
+            }
             try {
                 const res = await fetch('/api/admin/global-pin', {
                     method: 'POST',
-                    headers: {
+                    headers: { 
                         'Content-Type': 'application/json',
                         'Authorization': ADMIN_TOKEN
                     },
                     body: JSON.stringify({ pin })
                 });
                 if (res.ok) {
-                    alert("🎉 Global Master PIN changed! Re-logging in...");
-                    logout();
+                    alert("Global Admin Console PIN modified. System locking out to apply configuration changes.");
+                    lockConsole();
                 }
             } catch(e) {
-                alert("Error: " + e);
+                alert("Password updates failed.");
             }
         }
-
-        function renderDevices(devices) {
-            const container = document.getElementById('devicesList');
-            if (!devices || devices.length === 0) {
-                container.innerHTML = '<div class="text-slate-500 text-sm italic col-span-2 text-center py-4">No active nodes registered.</div>';
-                return;
-            }
-
-            container.innerHTML = devices.map(dev => {
-                const isBlocked = dev.status === 'Blocked';
-                const boundStatus = dev.registered_device_id
-                    ? '<div class="flex items-center justify-between text-[11px] bg-slate-950 p-2 rounded border border-slate-800 mt-2">\n' +
-                      '     <span class="text-amber-400 font-medium">📱 Device Registered</span>\n' +
-                      '     <button onclick="resetDevice(\'' + dev.key + '\')" class="text-[10px] bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded border border-amber-500/20 transition-all">\n' +
-                      '       Reset Binding\n' +
-                      '     </button>\n' +
-                      '   </div>'
-                    : '<div class="text-[11px] text-emerald-400 font-medium mt-2">📱 Status: Available for Registration</div>';
-
-                return '\n' +
-                    '                <div class="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3">\n' +
-                    '                    <div class="flex items-center justify-between">\n' +
-                    '                        <span class="px-2.5 py-0.5 rounded-full text-xs font-bold ' + (isBlocked ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20') + '">\n' +
-                    '                            ' + dev.status + '\n' +
-                    '                        </span>\n' +
-                    '                        <button onclick="toggleStatus(\'' + dev.key + '\', \'' + dev.status + '\')" class="text-xs text-indigo-400 hover:text-indigo-300 font-bold transition-colors">\n' +
-                    '                            ' + (isBlocked ? 'Activate' : 'Block Key') + '\n' +
-                    '                        </button>\n' +
-                    '                    </div>\n' +
-                    '                    \n' +
-                    '                    <div>\n' +
-                    '                        <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Device ID / Name</div>\n' +
-                    '                        <div class="font-bold text-white text-sm">' + dev.device_name + '</div>\n' +
-                    '                    </div>\n' +
-                    '\n' +
-                    '                    <div>\n' +
-                    '                        <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Registration Key</div>\n' +
-                    '                        <div class="code-font text-xs font-bold text-indigo-300 mt-1 select-all">' + dev.key + '</div>\n' +
-                    '                    </div>\n' +
-                    '\n' +
-                    boundStatus + '\n' +
-                    '\n' +
-                    '                    <div class="text-[10px] text-slate-500 pt-2 border-t border-slate-800/60">\n' +
-                    '                        Last active: ' + new Date(dev.last_active).toLocaleString() + '\n' +
-                    '                    </div>\n' +
-                    '                </div>\n';
-            }).join('');
-        }
-
-        function renderMessages(messages) {
-            const container = document.getElementById('messageStream');
-            if (!messages || messages.length === 0) {
-                container.innerHTML = '<div class="text-slate-500 text-sm italic py-8 text-center bg-slate-950/20 rounded-xl border border-dashed border-slate-800">No logs found. Ensure Gateway client is forwarding messages.</div>';
-                return;
-            }
-
-            container.innerHTML = messages.map(msg => '\n' +
-                '                <div class="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-2 hover:border-slate-800 transition-all">\n' +
-                '                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs">\n' +
-                '                        <div class="flex items-center gap-1.5 font-bold text-white">\n' +
-                '                            <span class="text-indigo-400">' + msg.sender + '</span>\n' +
-                '                            <span class="text-slate-600">→</span>\n' +
-                '                            <span class="text-indigo-300">' + msg.device_label + '</span>\n' +
-                '                            <span class="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-[10px] text-slate-400">' + msg.sim_slot + '</span>\n' +
-                '                        </div>\n' +
-                '                        <div class="text-slate-500">' + new Date(msg.received_at).toLocaleTimeString() + '</div>\n' +
-                '                    </div>\n' +
-                '                    <p class="text-sm text-slate-300 code-font break-words bg-slate-900/60 p-2 rounded-lg border border-slate-800/40">' + msg.message + '</p>\n' +
-                '                </div>\n'
-            ).join('');
-        }
-
-        // Auto Poll Live Data every 15 seconds
-        setInterval(fetchData, 15000);
     </script>
 </body>
 </html>
-`;
-
-/**
- * Serving dynamic Dashboard Home page
- */
-app.get('/', (req, res) => {
-    // Inject Supabase warning banner if needed
-    let html = DASHBOARD_HTML;
-    if (!supabase) {
-        const warningHtml = '<div class="bg-amber-500/15 border-b border-amber-500/30 text-amber-200 px-4 py-3 text-center text-sm font-semibold flex items-center justify-center gap-2 z-[60] relative"><span>⚠️</span><span>Supabase is not configured! Please add your <b>SUPABASE_URL</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> to your Vercel Project Environment Variables.</span></div>';
-        html = html.replace('<div id="dbWarning"></div>', '<div id="dbWarning">' + warningHtml + '</div>');
-    }
-    res.send(html);
+    `);
 });
 
-// Start Express Server (local development only)
-if (require.main === module) {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-        console.log('Server is running on port ' + PORT);
-    });
-}
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+});
 
 module.exports = app;
