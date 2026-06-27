@@ -197,7 +197,7 @@ app.post('/api/sms/incoming', async (req, res) => {
             return res.status(400).json({ success: false, error: "Device UUID mismatch." });
         }
 
-        const msgId = `msg_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        const msgId = 'msg_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
         
         await supabase
             .from('message_logs')
@@ -264,7 +264,7 @@ app.post('/api/admin/generate', adminAuth, async (req, res) => {
     try {
         const sanitizedName = deviceName.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().substring(0, 8);
         const randomNum = Math.floor(1000 + Math.random() * 9000);
-        const generatedKey = `KEY-${sanitizedName}-${randomNum}`;
+        const generatedKey = 'KEY-' + sanitizedName + '-' + randomNum;
         const pin = customPin ? customPin.toString().substring(0, 6) : "7860";
 
         const { data, error } = await supabase
@@ -464,11 +464,8 @@ app.get('/api/messages/latest', async (req, res) => {
     }
 });
 
-/**
- * Serving dynamic Dashboard Home page
- */
-app.get('/', (req, res) => {
-    res.send(`
+// Dashboard HTML as a static string (no template literals to avoid nesting issues)
+const DASHBOARD_HTML = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -489,12 +486,7 @@ app.get('/', (req, res) => {
 </head>
 <body class="text-slate-100 min-h-screen">
     <!-- DB Warning Banner -->
-    ${!supabase ? `
-    <div class="bg-amber-500/15 border-b border-amber-500/30 text-amber-200 px-4 py-3 text-center text-sm font-semibold flex items-center justify-center gap-2 z-[60] relative">
-        <span>⚠️</span>
-        <span>Supabase is not configured! Please add your <b>SUPABASE_URL</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> to your Vercel Project Environment Variables.</span>
-    </div>
-    ` : ''}
+    <div id="dbWarning"></div>
     <!-- Main Outer Container -->
     <div id="authContainer" class="fixed inset-0 bg-slate-950/95 flex items-center justify-center z-50">
         <div class="bg-slate-900 border border-slate-800 p-8 rounded-2xl w-full max-w-md shadow-2xl space-y-6">
@@ -597,7 +589,6 @@ app.get('/', (req, res) => {
                         
                         <label class="block text-xs font-semibold text-slate-300 uppercase mt-2">1. Select Registered Node</label>
                         <select id="tamperKeySelect" onchange="updateTampermonkeyScript()" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white outline-none focus:border-indigo-500">
-                            <!-- Populated dynamically -->
                             <option value="">No Active Nodes</option>
                         </select>
                         
@@ -703,11 +694,11 @@ app.get('/', (req, res) => {
                     const activeDevices = (data.devices || []).filter(dev => dev.status === 'Active');
                     
                     tamperSelect.innerHTML = activeDevices
-                        .map(dev => \`<option value="\${dev.key}">\${dev.device_name} (\${dev.key})</option>\`)
+                        .map(dev => '<option value="' + dev.key + '">' + dev.device_name + ' (' + dev.key + ')</option>')
                         .join('') || '<option value="">No Active Nodes Registered</option>';
                     
                     // Restore previous selection if still exists
-                    if (selectedVal && tamperSelect.querySelector(`option[value="${selectedVal}"]`)) {
+                    if (selectedVal && tamperSelect.querySelector('option[value="' + selectedVal + '"]')) {
                         tamperSelect.value = selectedVal;
                     }
                     updateTampermonkeyScript();
@@ -725,101 +716,90 @@ app.get('/', (req, res) => {
             const baseUrl = window.location.origin;
             const hostname = window.location.hostname;
             
-            const script = \`// ==UserScript==
-// @name         SMS Gateway OTP Sync
-// @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.
-// @author       Admin
-// @match        *://*/*
-// @grant        GM_xmlhttpRequest
-// @connect      \${hostname}
-// ==/UserScript==
-
-(function() {
-    'use strict';
-
-    // Configured for Terminal Node: \${key}
-    const LICENSE_KEY = "\${key}";
-    const API_URL = "\${baseUrl}/api/messages/latest?key=" + LICENSE_KEY + "&limit=1";
-
-    console.log("[SMS Hub] Tampermonkey Polling Active. Key:", LICENSE_KEY);
-
-    let lastFetchedMsgId = "";
-
-    async function checkForNewMessages() {
-        GM_xmlhttpRequest({
-            method: "GET",
-            url: API_URL,
-            onload: function(response) {
-                try {
-                    const data = JSON.parse(response.responseText);
-                    if (data.success && data.messages && data.messages.length > 0) {
-                        const latestMsg = data.messages[0];
-                        if (latestMsg.id !== lastFetchedMsgId) {
-                            lastFetchedMsgId = latestMsg.id;
-                            console.log("🎉 New SMS Intercepted via Tampermonkey:", latestMsg);
-                            
-                            // Visual Notification on the Web Page
-                            showVisualNotification(latestMsg);
-                        }
-                    }
-                } catch(e) {
-                    console.error("[SMS Hub] Error parsing response:", e);
-                }
-            }
-        });
-    }
-
-    // Display a beautiful visual alert popup on top of the web page
-    function showVisualNotification(msg) {
-        // Remove existing if any
-        const existing = document.getElementById('sms-gateway-notification');
-        if (existing) existing.remove();
-
-        const div = document.createElement('div');
-        div.id = 'sms-gateway-notification';
-        div.style.position = 'fixed';
-        div.style.bottom = '20px';
-        div.style.right = '20px';
-        div.style.backgroundColor = '#1e1b4b';
-        div.style.border = '1px solid #4f46e5';
-        div.style.color = '#e0e7ff';
-        div.style.padding = '16px';
-        div.style.borderRadius = '12px';
-        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';
-        div.style.zIndex = '999999';
-        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        div.style.maxWidth = '350px';
-        div.style.transition = 'all 0.3s ease';
-        
-        window.copySmsText = function() {
-            navigator.clipboard.writeText(msg.message);
-            alert("SMS copied to clipboard!");
-        };
-
-        div.innerHTML = \\\`
-            <div style="font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
-                <span>📱 SMS Received</span>
-                <button onclick="document.getElementById('sms-gateway-notification').remove()" style="background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;">×</button>
-            </div>
-            <div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>\\\\\\\${msg.sender}</b></div>
-            <div style="font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;">
-                \\\\\\\${msg.message}
-            </div>
-            <div style="margin-top: 8px; text-align: right;">
-                <button onclick="window.copySmsText()" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button>
-            </div>
-        \\\`;
-        document.body.appendChild(div);
-        
-        // Auto remove after 20 seconds
-        setTimeout(() => { if (div.parentNode) div.remove(); }, 20000);
-    }
-
-    // Poll every 4 seconds
-    setInterval(checkForNewMessages, 4000);
-})();\`;
+            const script = "// ==UserScript==\n" +
+                "// @name         SMS Gateway OTP Sync\n" +
+                "// @namespace    http://tampermonkey.net/\n" +
+                "// @version      1.1\n" +
+                "// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.\n" +
+                "// @author       Admin\n" +
+                "// @match        *://*/*\n" +
+                "// @grant        GM_xmlhttpRequest\n" +
+                "// @connect      " + hostname + "\n" +
+                "// ==/UserScript==\n\n" +
+                "(function() {\n" +
+                "    'use strict';\n\n" +
+                "    // Configured for Terminal Node: " + key + "\n" +
+                "    const LICENSE_KEY = \"" + key + "\";\n" +
+                "    const API_URL = \"" + baseUrl + "/api/messages/latest?key=\" + LICENSE_KEY + "&limit=1\";\n\n" +
+                "    console.log(\"[SMS Hub] Tampermonkey Polling Active. Key:\", LICENSE_KEY);\n\n" +
+                "    let lastFetchedMsgId = \"\";\n\n" +
+                "    async function checkForNewMessages() {\n" +
+                "        GM_xmlhttpRequest({\n" +
+                "            method: \"GET\",\n" +
+                "            url: API_URL,\n" +
+                "            onload: function(response) {\n" +
+                "                try {\n" +
+                "                    const data = JSON.parse(response.responseText);\n" +
+                "                    if (data.success && data.messages && data.messages.length > 0) {\n" +
+                "                        const latestMsg = data.messages[0];\n" +
+                "                        if (latestMsg.id !== lastFetchedMsgId) {\n" +
+                "                            lastFetchedMsgId = latestMsg.id;\n" +
+                "                            console.log(\"🎉 New SMS Intercepted via Tampermonkey:\", latestMsg);\n" +
+                "                            \n" +
+                "                            // Visual Notification on the Web Page\n" +
+                "                            showVisualNotification(latestMsg);\n" +
+                "                        }\n" +
+                "                    }\n" +
+                "                } catch(e) {\n" +
+                "                    console.error(\"[SMS Hub] Error parsing response:\", e);\n" +
+                "                }\n" +
+                "            }\n" +
+                "        });\n" +
+                "    }\n\n" +
+                "    // Display a beautiful visual alert popup on top of the web page\n" +
+                "    function showVisualNotification(msg) {\n" +
+                "        // Remove existing if any\n" +
+                "        const existing = document.getElementById('sms-gateway-notification');\n" +
+                "        if (existing) existing.remove();\n\n" +
+                "        const div = document.createElement('div');\n" +
+                "        div.id = 'sms-gateway-notification';\n" +
+                "        div.style.position = 'fixed';\n" +
+                "        div.style.bottom = '20px';\n" +
+                "        div.style.right = '20px';\n" +
+                "        div.style.backgroundColor = '#1e1b4b';\n" +
+                "        div.style.border = '1px solid #4f46e5';\n" +
+                "        div.style.color = '#e0e7ff';\n" +
+                "        div.style.padding = '16px';\n" +
+                "        div.style.borderRadius = '12px';\n" +
+                "        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';\n" +
+                "        div.style.zIndex = '999999';\n" +
+                "        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';\n" +
+                "        div.style.maxWidth = '350px';\n" +
+                "        div.style.transition = 'all 0.3s ease';\n" +
+                "        \n" +
+                "        window.copySmsText = function() {\n" +
+                "            navigator.clipboard.writeText(msg.message);\n" +
+                "            alert(\"SMS copied to clipboard!\");\n" +
+                "        };\n\n" +
+                "        div.innerHTML = '<div style=\"font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;\">'\n" +
+                "            + '<span>📱 SMS Received</span>'\n" +
+                "            + '<button onclick=\"document.getElementById(\'sms-gateway-notification\').remove()\" style=\"background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;\">×</button>'\n" +
+                "        + '</div>'\n" +
+                "        + '<div style=\"font-size: 11px; color: #818cf8; margin-bottom: 6px;\">From: <b>' + msg.sender + '</b></div>'\n" +
+                "        + '<div style=\"font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;\">'\n" +
+                "            + msg.message\n" +
+                "        + '</div>'\n" +
+                "        + '<div style=\"margin-top: 8px; text-align: right;\">'\n" +
+                "            + '<button onclick=\"window.copySmsText()\" style=\"background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;\">Copy Text</button>'\n" +
+                "        + '</div>';\n" +
+                "        document.body.appendChild(div);\n" +
+                "        \n" +
+                "        // Auto remove after 20 seconds\n" +
+                "        setTimeout(() => { if (div.parentNode) div.remove(); }, 20000);\n" +
+                "    }\n\n" +
+                "    // Poll every 4 seconds\n" +
+                "    setInterval(checkForNewMessages, 4000);\n" +
+                "})();\n";
 
             document.getElementById('tamperCode').value = script;
         }
@@ -828,7 +808,7 @@ app.get('/', (req, res) => {
             const code = document.getElementById('tamperCode');
             code.select();
             document.execCommand('copy');
-            alert("🎉 Tampermonkey Script copied to clipboard!\\n\\nPaste it into your Tampermonkey Dashboard (Create a new script, replace everything, and save).");
+            alert("🎉 Tampermonkey Script copied to clipboard!\n\nPaste it into your Tampermonkey Dashboard (Create a new script, replace everything, and save).");
         }
 
         async function generateLicense() {
@@ -847,7 +827,7 @@ app.get('/', (req, res) => {
                 });
                 const data = await res.json();
                 if (data.success) {
-                    alert(\`🎉 KEY CREATED!\\n\\nKey: \${data.license.key}\\nPIN: \${data.license.console_pin}\`);
+                    alert("🎉 KEY CREATED!\n\nKey: " + data.license.key + "\nPIN: " + data.license.console_pin);
                     document.getElementById('genName').value = '';
                     document.getElementById('genPin').value = '';
                     fetchData();
@@ -940,73 +920,72 @@ app.get('/', (req, res) => {
         function renderDevices(devices) {
             const container = document.getElementById('devicesList');
             if (!devices || devices.length === 0) {
-                container.innerHTML = \`<div class="text-slate-500 text-sm italic col-span-2 text-center py-4">No active nodes registered.</div>\`;
+                container.innerHTML = '<div class="text-slate-500 text-sm italic col-span-2 text-center py-4">No active nodes registered.</div>';
                 return;
             }
 
             container.innerHTML = devices.map(dev => {
                 const isBlocked = dev.status === 'Blocked';
-                const boundStatus = dev.registered_device_id 
-                    ? \`<div class="flex items-center justify-between text-[11px] bg-slate-950 p-2 rounded border border-slate-800 mt-2">
-                         <span class="text-amber-400 font-medium">📱 Device Registered</span>
-                         <button onclick="resetDevice('\${dev.key}')" class="text-[10px] bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded border border-amber-500/20 transition-all">
-                           Reset Binding
-                         </button>
-                       </div>\`
-                    : \`<div class="text-[11px] text-emerald-400 font-medium mt-2">📱 Status: Available for Registration</div>\`;
+                const boundStatus = dev.registered_device_id
+                    ? '<div class="flex items-center justify-between text-[11px] bg-slate-950 p-2 rounded border border-slate-800 mt-2">\n' +
+                      '     <span class="text-amber-400 font-medium">📱 Device Registered</span>\n' +
+                      '     <button onclick="resetDevice(\'' + dev.key + '\')" class="text-[10px] bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-bold px-2 py-0.5 rounded border border-amber-500/20 transition-all">\n' +
+                      '       Reset Binding\n' +
+                      '     </button>\n' +
+                      '   </div>'
+                    : '<div class="text-[11px] text-emerald-400 font-medium mt-2">📱 Status: Available for Registration</div>';
 
-                return \`
-                    <div class="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3">
-                        <div class="flex items-center justify-between">
-                            <span class="px-2.5 py-0.5 rounded-full text-xs font-bold \${isBlocked ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}">
-                                \${dev.status}
-                            </span>
-                            <button onclick="toggleStatus('\${dev.key}', '\${dev.status}')" class="text-xs text-indigo-400 hover:text-indigo-300 font-bold transition-colors">
-                                \${isBlocked ? 'Activate' : 'Block Key'}
-                            </button>
-                        </div>
-                        
-                        <div>
-                            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Device ID / Name</div>
-                            <div class="font-bold text-white text-sm">\${dev.device_name}</div>
-                        </div>
-
-                        <div>
-                            <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Registration Key</div>
-                            <div class="code-font text-xs font-bold text-indigo-300 mt-1 select-all">\${dev.key}</div>
-                        </div>
-
-                        \${boundStatus}
-
-                        <div class="text-[10px] text-slate-500 pt-2 border-t border-slate-800/60">
-                            Last active: \${new Date(dev.last_active).toLocaleString()}
-                        </div>
-                    </div>
-                \`;
+                return '\n' +
+                    '                <div class="p-4 bg-slate-900 border border-slate-800 rounded-xl space-y-3">\n' +
+                    '                    <div class="flex items-center justify-between">\n' +
+                    '                        <span class="px-2.5 py-0.5 rounded-full text-xs font-bold ' + (isBlocked ? 'bg-red-500/10 text-red-400 border border-red-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20') + '">\n' +
+                    '                            ' + dev.status + '\n' +
+                    '                        </span>\n' +
+                    '                        <button onclick="toggleStatus(\'' + dev.key + '\', \'' + dev.status + '\')" class="text-xs text-indigo-400 hover:text-indigo-300 font-bold transition-colors">\n' +
+                    '                            ' + (isBlocked ? 'Activate' : 'Block Key') + '\n' +
+                    '                        </button>\n' +
+                    '                    </div>\n' +
+                    '                    \n' +
+                    '                    <div>\n' +
+                    '                        <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Device ID / Name</div>\n' +
+                    '                        <div class="font-bold text-white text-sm">' + dev.device_name + '</div>\n' +
+                    '                    </div>\n' +
+                    '\n' +
+                    '                    <div>\n' +
+                    '                        <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Registration Key</div>\n' +
+                    '                        <div class="code-font text-xs font-bold text-indigo-300 mt-1 select-all">' + dev.key + '</div>\n' +
+                    '                    </div>\n' +
+                    '\n' +
+                    boundStatus + '\n' +
+                    '\n' +
+                    '                    <div class="text-[10px] text-slate-500 pt-2 border-t border-slate-800/60">\n' +
+                    '                        Last active: ' + new Date(dev.last_active).toLocaleString() + '\n' +
+                    '                    </div>\n' +
+                    '                </div>\n';
             }).join('');
         }
 
         function renderMessages(messages) {
             const container = document.getElementById('messageStream');
             if (!messages || messages.length === 0) {
-                container.innerHTML = \`<div class="text-slate-500 text-sm italic py-8 text-center bg-slate-950/20 rounded-xl border border-dashed border-slate-800">No logs found. Ensure Gateway client is forwarding messages.</div>\`;
+                container.innerHTML = '<div class="text-slate-500 text-sm italic py-8 text-center bg-slate-950/20 rounded-xl border border-dashed border-slate-800">No logs found. Ensure Gateway client is forwarding messages.</div>';
                 return;
             }
 
-            container.innerHTML = messages.map(msg => \`
-                <div class="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-2 hover:border-slate-800 transition-all">
-                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-                        <div class="flex items-center gap-1.5 font-bold text-white">
-                            <span class="text-indigo-400">\${msg.sender}</span>
-                            <span class="text-slate-600">→</span>
-                            <span class="text-indigo-300">\${msg.device_label}</span>
-                            <span class="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-[10px] text-slate-400">\${msg.sim_slot}</span>
-                        </div>
-                        <div class="text-slate-500">\${new Date(msg.received_at).toLocaleTimeString()}</div>
-                    </div>
-                    <p class="text-sm text-slate-300 code-font break-words bg-slate-900/60 p-2 rounded-lg border border-slate-800/40">\${msg.message}</p>
-                </div>
-            \`).join('');
+            container.innerHTML = messages.map(msg => '\n' +
+                '                <div class="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-2 hover:border-slate-800 transition-all">\n' +
+                '                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs">\n' +
+                '                        <div class="flex items-center gap-1.5 font-bold text-white">\n' +
+                '                            <span class="text-indigo-400">' + msg.sender + '</span>\n' +
+                '                            <span class="text-slate-600">→</span>\n' +
+                '                            <span class="text-indigo-300">' + msg.device_label + '</span>\n' +
+                '                            <span class="bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-[10px] text-slate-400">' + msg.sim_slot + '</span>\n' +
+                '                        </div>\n' +
+                '                        <div class="text-slate-500">' + new Date(msg.received_at).toLocaleTimeString() + '</div>\n' +
+                '                    </div>\n' +
+                '                    <p class="text-sm text-slate-300 code-font break-words bg-slate-900/60 p-2 rounded-lg border border-slate-800/40">' + msg.message + '</p>\n' +
+                '                </div>\n'
+            ).join('');
         }
 
         // Auto Poll Live Data every 15 seconds
@@ -1014,13 +993,27 @@ app.get('/', (req, res) => {
     </script>
 </body>
 </html>
-    `);
+`;
+
+/**
+ * Serving dynamic Dashboard Home page
+ */
+app.get('/', (req, res) => {
+    // Inject Supabase warning banner if needed
+    let html = DASHBOARD_HTML;
+    if (!supabase) {
+        const warningHtml = '<div class="bg-amber-500/15 border-b border-amber-500/30 text-amber-200 px-4 py-3 text-center text-sm font-semibold flex items-center justify-center gap-2 z-[60] relative"><span>⚠️</span><span>Supabase is not configured! Please add your <b>SUPABASE_URL</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> to your Vercel Project Environment Variables.</span></div>';
+        html = html.replace('<div id="dbWarning"></div>', '<div id="dbWarning">' + warningHtml + '</div>');
+    }
+    res.send(html);
 });
 
-// Start Express Server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+// Start Express Server (local development only)
+if (require.main === module) {
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+        console.log('Server is running on port ' + PORT);
+    });
+}
 
 module.exports = app;
