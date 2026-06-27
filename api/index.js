@@ -310,7 +310,7 @@ app.post('/api/admin/generate', adminAuth, async (req, res) => {
     
     // Generate unique license parameters
     const rand = Math.floor(1000 + Math.random() * 9000);
-    const key = 'KEY-${label.toUpperCase().replace(/[^A-Z0-9]/g, '')}-${rand}';
+    const key = 'KEY-' + label.toUpperCase().replace(/[^A-Z0-9]/g, '') + '-' + rand;
     const pin = customPin || String(rand);
     
     try {
@@ -443,7 +443,7 @@ app.get('/api/admin/dashboard-data', adminAuth, async (req, res) => {
 // ADMIN DASHBOARD USER INTERFACE ROUTE (UI)
 // ==========================================
 app.get('/', async (req, res) => {
-    res.send('
+    var html = '
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -470,14 +470,18 @@ app.get('/', async (req, res) => {
         }
     </style>
 </head>
-<body class="text-slate-100 min-h-screen">
+<body class="text-slate-100 min-h-screen">';
+    
+    if (!supabase) {
+        html += '
     <!-- DB Warning Banner -->
-    ${!supabase ? '
     <div class="bg-amber-500/15 border-b border-amber-500/30 text-amber-200 px-4 py-3 text-center text-sm font-semibold flex items-center justify-center gap-2 z-[60] relative">
         <span>⚠️</span>
         <span>Supabase is not configured! Please add your <b>SUPABASE_URL</b> and <b>SUPABASE_SERVICE_ROLE_KEY</b> to your Vercel Project Environment Variables.</span>
-    </div>
-    ' : ''}
+    </div>';
+    }
+    
+    html += '
     <!-- Main Outer Container -->
     <div id="authContainer" class="fixed inset-0 bg-slate-950/95 flex items-center justify-center z-50">
         <div class="bg-slate-900 border border-slate-800 p-8 rounded-2xl w-full max-w-md shadow-2xl space-y-6">
@@ -695,10 +699,10 @@ app.get('/', async (req, res) => {
                     const activeDevices = (data.devices || []).filter(dev => dev.status === 'Active');
                     
                     tamperSelect.innerHTML = activeDevices
-                        .map(dev => \'<option value="${dev.key}">${dev.device_name} (${dev.key})</option>\')
+                        .map(dev => '<option value="' + dev.key + ''>' + dev.device_name + ' (' + dev.key + ')</option>')
                         .join('') || '<option value="">No Active Nodes Registered</option>';
                     
-                    if (selectedVal && tamperSelect.querySelector('option[value="${selectedVal}"]')) {
+                    if (selectedVal && tamperSelect.querySelector('option[value="' + selectedVal + '"]')) {
                         tamperSelect.value = selectedVal;
                     }
                     updateTampermonkeyScript();
@@ -716,101 +720,148 @@ app.get('/', async (req, res) => {
             const baseUrl = window.location.origin;
             const hostname = window.location.hostname;
             
-            const script = \'// ==UserScript==
-// @name         SMS Gateway OTP Sync
-// @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.
-// @author       Admin
-// @match        *://*/*
-// @grant        GM_xmlhttpRequest
-// @connect      ${hostname}
-// ==/UserScript==
+            const script = '// ==UserScript==
+' +
+                            '// @name         SMS Gateway OTP Sync
+' +
+                            '// @namespace    http://tampermonkey.net/
+' +
+                            '// @version      1.1
+' +
+                            '// @description  Fetch SMS messages from SMS Gateway Vercel API and use them.
+' +
+                            '// @author       Admin
+' +
+                            '// @match        *://*/*
+' +
+                            '// @grant        GM_xmlhttpRequest
+' +
+                            '// @connect      ' + hostname + '
+' +
+                            '// ==/UserScript==
 
-(function() {
-    'use strict';
+' +
+                            '(function() {
+' +
+                            '    ' + 'use strict';
 
-    // Configured for Terminal Node: ${key}
-    const LICENSE_KEY = "${key}";
-    const API_URL = "${baseUrl}/api/messages/latest?key=" + LICENSE_KEY + "&limit=1";
+' +
+                            '    // Configured for Terminal Node: ' + key + '
+' +
+                            '    const LICENSE_KEY = "' + key + '";
+' +
+                            '    const API_URL = "' + baseUrl + '/api/messages/latest?key=" + LICENSE_KEY + "&limit=1";
 
-    console.log("[SMS Hub] Tampermonkey Polling Active. Key:", LICENSE_KEY);
+' +
+                            '    console.log("[SMS Hub] Tampermonkey Polling Active. Key:", LICENSE_KEY);
 
-    let lastFetchedMsgId = "";
+' +
+                            '    let lastFetchedMsgId = "";
 
-    async function checkForNewMessages() {
-        GM_xmlhttpRequest({
-            method: "GET",
-            url: API_URL,
-            onload: function(response) {
-                try {
-                    const data = JSON.parse(response.responseText);
-                    if (data.success && data.messages && data.messages.length > 0) {
-                        const latestMsg = data.messages[0];
-                        if (latestMsg.id !== lastFetchedMsgId) {
-                            lastFetchedMsgId = latestMsg.id;
-                            console.log("🎉 New SMS Intercepted via Tampermonkey:", latestMsg);
-                            
-                            // Visual Notification on the Web Page
-                            showVisualNotification(latestMsg);
-                        }
-                    }
-                } catch(e) {
-                    console.error("[SMS Hub] Error parsing response:", e);
-                }
-            }
-        });
-    }
+' +
+                            '    async function checkForNewMessages() {
+' +
+                            '        GM_xmlhttpRequest({
+' +
+                            '            method: "GET",
+' +
+                            '            url: API_URL,
+' +
+                            '            onload: function(response) {
+' +
+                            '                try {
+' +
+                            '                    const data = JSON.parse(response.responseText);
+' +
+                            '                    if (data.success && data.messages && data.messages.length > 0) {
+' +
+                            '                        const latestMsg = data.messages[0];
+' +
+                            '                        if (latestMsg.id !== lastFetchedMsgId) {
+' +
+                            '                            lastFetchedMsgId = latestMsg.id;
+' +
+                            '                            console.log("🎉 New SMS Intercepted via Tampermonkey:", latestMsg);
+' +
+                            '                            showVisualNotification(latestMsg);
+' +
+                            '                        }
+' +
+                            '                    }
+' +
+                            '                } catch(e) {
+' +
+                            '                    console.error("[SMS Hub] Error parsing response:", e);
+' +
+                            '                }
+' +
+                            '            }
+' +
+                            '        });
+' +
+                            '    }
 
-    // Display a beautiful visual alert popup on top of the web page
-    function showVisualNotification(msg) {
-        // Remove existing if any
-        const existing = document.getElementById('sms-gateway-notification');
-        if (existing) existing.remove();
+' +
+                            '    function showVisualNotification(msg) {
+' +
+                            '        const existing = document.getElementById('sms-gateway-notification');
+' +
+                            '        if (existing) existing.remove();
 
-        const div = document.createElement('div');
-        div.id = 'sms-gateway-notification';
-        div.style.position = 'fixed';
-        div.style.bottom = '20px';
-        div.style.right = '20px';
-        div.style.backgroundColor = '#1e1b4b';
-        div.style.border = '1px solid #4f46e5';
-        div.style.color = '#e0e7ff';
-        div.style.padding = '16px';
-        div.style.borderRadius = '12px';
-        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';
-        div.style.zIndex = '999999';
-        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';
-        div.style.maxWidth = '350px';
-        div.style.transition = 'all 0.3s ease';
-        
-        window.copySmsText = function() {
-            navigator.clipboard.writeText(msg.message);
-            alert("SMS copied to clipboard!");
-        };
+' +
+                            '        const div = document.createElement('div');
+' +
+                            '        div.id = 'sms-gateway-notification';
+' +
+                            '        div.style.position = 'fixed';
+' +
+                            '        div.style.bottom = '20px';
+' +
+                            '        div.style.right = '20px';
+' +
+                            '        div.style.backgroundColor = '#1e1b4b';
+' +
+                            '        div.style.border = '1px solid #4f46e5';
+' +
+                            '        div.style.color = '#e0e7ff';
+' +
+                            '        div.style.padding = '16px';
+' +
+                            '        div.style.borderRadius = '12px';
+' +
+                            '        div.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.5)';
+' +
+                            '        div.style.zIndex = '999999';
+' +
+                            '        div.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+' +
+                            '        div.style.maxWidth = '350px';
+' +
+                            '        div.style.transition = 'all 0.3s ease';
 
-        div.innerHTML = \\\'
-            <div style="font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
-                <span>📱 SMS Received</span>
-                <button onclick="document.getElementById('sms-gateway-notification').remove()" style="background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;">×</button>
-            </div>
-            <div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>\\\\\\${msg.sender}</b></div>
-            <div style="font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;">
-                \\\\\\${msg.message}
-            </div>
-            <div style="margin-top: 8px; text-align: right;">
-                <button onclick="window.copySmsText()" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button>
-            </div>
-        \\\';
-        document.body.appendChild(div);
-        
-        // Auto remove after 20 seconds
-        setTimeout(() => { if (div.parentNode) div.remove(); }, 20000);
-    }
+' +
+                            '        window.copySmsText = function() {
+' +
+                            '            navigator.clipboard.writeText(msg.message);
+' +
+                            '            alert("SMS copied to clipboard!");
+' +
+                            '        };
 
-    // Poll every 4 seconds
-    setInterval(checkForNewMessages, 4000);
-})();\';
+' +
+                            '        div.innerHTML = '<div style="font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;"><span>📱 SMS Received</span><button onclick="document.getElementById('sms-gateway-notification').remove()" style="background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;">×</button></div><div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>' + msg.sender + '</b></div><div style="font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;">' + msg.message + '</div><div style="margin-top: 8px; text-align: right;"><button onclick="window.copySmsText()" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button></div>';
+' +
+                            '        document.body.appendChild(div);
+
+' +
+                            '        setTimeout(function() { if (div.parentNode) div.remove(); }, 20000);
+' +
+                            '    }
+
+' +
+                            '    setInterval(checkForNewMessages, 4000);
+' +
+                            '})();';
 
             document.getElementById('tamperCode').value = script;
         }
@@ -829,39 +880,13 @@ app.get('/', async (req, res) => {
                 return;
             }
             
-            tbody.innerHTML = devices.map(dev => {
-                const isOnline = (new Date() - new Date(dev.last_active)) < 30000; // Active within 30s
+            tbody.innerHTML = devices.map(function(dev) {
+                const isOnline = (new Date() - new Date(dev.last_active)) < 30000;
                 const dateStr = dev.last_active ? new Date(dev.last_active).toLocaleTimeString() : 'Never';
-                
                 const statusColor = dev.status === 'Active' ? 'text-emerald-400' : 'text-rose-400';
                 const pillColor = dev.status === 'Active' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400';
                 
-                return \'
-                    <tr class="hover:bg-slate-950/40 transition-colors">
-                        <td class="p-4 font-semibold text-white">
-                            ${dev.device_name}
-                            <span class="block text-xs font-normal text-slate-400">ID: ${dev.registered_device_id || 'Awaiting Device Sync...'}</span>
-                        </td>
-                        <td class="p-4 font-mono text-xs text-indigo-300">${dev.key}</td>
-                        <td class="p-4 font-mono text-xs text-slate-300 font-semibold bg-slate-950/40">${dev.console_pin}</td>
-                        <td class="p-4 text-xs text-slate-300">
-                            ${dateStr}
-                            ${isOnline ? '<span class="ml-1 text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded-full font-bold">LIVE</span>' : ''}
-                        </td>
-                        <td class="p-4 text-xs">
-                            <span class="px-2 py-1 rounded-md font-semibold ${pillColor}">${dev.status}</span>
-                        </td>
-                        <td class="p-4 text-right space-x-2">
-                            <button onclick="toggleDeviceStatus('${dev.key}', '${dev.status === 'Active' ? 'Inactive' : 'Active'}')" class="text-xs font-bold text-indigo-400 hover:text-indigo-300 hover:underline">
-                                ${dev.status === 'Active' ? 'Disable' : 'Enable'}
-                            </button>
-                            <span class="text-slate-700">|</span>
-                            <button onclick="resetDeviceLock('${dev.key}')" class="text-xs font-bold text-slate-400 hover:text-rose-400 hover:underline">
-                                Unpair Hardware
-                            </button>
-                        </td>
-                    </tr>
-                \';
+                return '<tr class="hover:bg-slate-950/40 transition-colors"><td class="p-4 font-semibold text-white">' + dev.device_name + '<span class="block text-xs font-normal text-slate-400">ID: ' + (dev.registered_device_id || 'Awaiting Device Sync...') + '</span></td><td class="p-4 font-mono text-xs text-indigo-300">' + dev.key + '</td><td class="p-4 font-mono text-xs text-slate-300 font-semibold bg-slate-950/40">' + dev.console_pin + '</td><td class="p-4 text-xs text-slate-300">' + dateStr + (isOnline ? ' <span class="ml-1 text-[10px] bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded-full font-bold">LIVE</span>' : '') + '</td><td class="p-4 text-xs"><span class="px-2 py-1 rounded-md font-semibold ' + pillColor + ''>' + dev.status + '</span></td><td class="p-4 text-right space-x-2"><button onclick="toggleDeviceStatus('' + dev.key + '', '' + (dev.status === 'Active' ? 'Inactive' : 'Active') + '')" class="text-xs font-bold text-indigo-400 hover:text-indigo-300 hover:underline">' + (dev.status === 'Active' ? 'Disable' : 'Enable') + '</button><span class="text-slate-700">|</span><button onclick="resetDeviceLock('' + dev.key + '')" class="text-xs font-bold text-slate-400 hover:text-rose-400 hover:underline">Unpair Hardware</button></td></tr>';
             }).join('');
         }
 
@@ -872,23 +897,9 @@ app.get('/', async (req, res) => {
                 return;
             }
             
-            container.innerHTML = messages.map(msg => {
+            container.innerHTML = messages.map(function(msg) {
                 const date = new Date(msg.timestamp || msg.received_at).toLocaleTimeString();
-                return \'
-                    <div class="p-4 bg-slate-950/60 rounded-xl border border-indigo-950/40 hover:border-indigo-900/60 transition-all flex flex-col md:flex-row justify-between gap-4">
-                        <div class="space-y-1">
-                            <div class="flex items-center gap-2">
-                                <span class="text-xs bg-indigo-500/10 text-indigo-300 px-2.5 py-0.5 rounded-full font-semibold font-mono">From: ${msg.sender}</span>
-                                <span class="text-[11px] text-slate-400 font-mono">${date}</span>
-                                <span class="text-[11px] text-slate-500 font-mono">(${msg.device_label || 'Default Label'} • ${msg.sim_slot})</span>
-                            </div>
-                            <p class="text-sm text-slate-300 font-mono select-all bg-slate-950/40 p-2 border border-slate-900 rounded-lg mt-2">${msg.message}</p>
-                        </div>
-                        <div class="flex items-center justify-end">
-                            <span class="text-xs px-2.5 py-0.5 bg-emerald-500/10 text-emerald-400 font-semibold rounded-md">FORWARDED</span>
-                        </div>
-                    </div>
-                \';
+                return '<div class="p-4 bg-slate-950/60 rounded-xl border border-indigo-950/40 hover:border-indigo-900/60 transition-all flex flex-col md:flex-row justify-between gap-4"><div class="space-y-1"><div class="flex items-center gap-2"><span class="text-xs bg-indigo-500/10 text-indigo-300 px-2.5 py-0.5 rounded-full font-semibold font-mono">From: ' + msg.sender + '</span><span class="text-[11px] text-slate-400 font-mono">' + date + '</span><span class="text-[11px] text-slate-500 font-mono">(' + (msg.device_label || 'Default Label') + ' • ' + msg.sim_slot + ')</span></div><p class="text-sm text-slate-300 font-mono select-all bg-slate-950/40 p-2 border border-slate-900 rounded-lg mt-2">' + msg.message + '</p></div><div class="flex items-center justify-end"><span class="text-xs px-2.5 py-0.5 bg-emerald-500/10 text-emerald-400 font-semibold rounded-md">FORWARDED</span></div></div>';
             }).join('');
         }
 
@@ -911,7 +922,10 @@ app.get('/', async (req, res) => {
                 });
                 const data = await res.json();
                 if (data.success) {
-                    alert(\'🎉 KEY CREATED!\\n\\nKey: ${data.license.key}\\nPIN: ${data.license.console_pin}\');
+                    alert('🎉 KEY CREATED!
+
+Key: ' + data.license.key + '
+PIN: ' + data.license.console_pin);
                     document.getElementById('devLabel').value = '';
                     document.getElementById('devPin').value = '';
                     fetchConsoleTelemetry();
@@ -1009,7 +1023,7 @@ app.get('/', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log('Server is running on port ' + PORT);
 });
 
 module.exports = app;
